@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="AgentPulse"
 BUNDLE_ID="com.agentpulse.app"
-APP_VERSION="1.0.0"
+APP_VERSION="1.0.1"
 DIST_DIR="$PWD/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -21,6 +21,7 @@ swift build --disable-sandbox -c release \
     --config-path "$PWD/.build/swiftpm-config" \
     --security-path "$PWD/.build/swiftpm-security"
 
+rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$PWD/.build/release/AgentPulse" "$MACOS_DIR/$APP_NAME"
 cp "$PWD/.build/release/agentpulse-cli" "$RESOURCES_DIR/agentpulse-cli"
@@ -53,6 +54,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>

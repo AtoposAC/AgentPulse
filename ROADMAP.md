@@ -11,9 +11,13 @@
 
 ## v1.0.1
 
-- GitHub Release 检查
+- Agent Journal
 
 ## v1.0.2
+
+- GitHub Release 检查
+
+## v1.0.3
 
 - 自动更新
 

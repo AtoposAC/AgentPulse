@@ -21,7 +21,7 @@ public struct FloatingCapsuleStackView: View {
             hoverTimer?.invalidate()
             hoverTimer = Timer.scheduledTimer(withTimeInterval: inside ? 0.2 : 0.3, repeats: false) { _ in
                 Task { @MainActor in
-                    withAnimation(.easeInOut(duration: inside ? 0.18 : 0.16)) {
+                    withAnimation(.easeInOut(duration: 0.24)) {
                         expanded = inside
                     }
                 }
@@ -52,40 +52,41 @@ public struct FloatingCapsuleView: View {
             header
             expandedBody
                 .opacity(expanded ? 1 : 0)
+                .offset(y: expanded ? 0 : -6)
                 .frame(height: expanded ? nil : 0, alignment: .top)
                 .clipped()
         }
-        .frame(width: 356, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, expanded ? 14 : 12)
-        .background(CapsuleGlassBackground(settings: settings, cornerRadius: 24))
+        .frame(width: expanded ? 356 : 260, alignment: .leading)
+        .padding(.horizontal, expanded ? 12 : 7)
+        .padding(.vertical, expanded ? 10 : 7)
+        .background(CapsuleGlassBackground(settings: settings, cornerRadius: expanded ? 20 : 15))
         .foregroundStyle(settings.primaryText(system: colorScheme))
         .fontDesign(.default)
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            StatusDot(signal: agent.signal)
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: expanded ? 9 : 5) {
+            StatusDot(signal: agent.signal, compact: !expanded)
+            VStack(alignment: .leading, spacing: expanded ? 2 : 1) {
                 Text("\(agent.kind.displayName) · \(agent.signal.title)")
-                    .font(.system(size: 13))
+                    .font(.system(size: 10))
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
                     .lineLimit(1)
                 Text(AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode))
-                    .font(.system(size: 20, weight: .bold).monospacedDigit())
+                    .font(.system(size: 14, weight: .bold).monospacedDigit())
                     .lineLimit(1)
                 Text("\(AgentPulseFormatters.tokens(agent.usage.todayTokens)) 今日")
-                    .font(.system(size: 13).monospacedDigit())
+                    .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(AgentPulseColors.token)
                     .lineLimit(1)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: expanded ? 6 : 2)
             quotaBadge(agent.usage.quota5hRemainingPercent)
         }
     }
 
     private var expandedBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             DividerLine(settings: settings)
             metricRow("费用", AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode), title: "今日用量")
             metricRow("Token", AgentPulseFormatters.tokens(agent.usage.todayTokens))
@@ -94,13 +95,13 @@ public struct FloatingCapsuleView: View {
             quotaRow("本周", value: agent.usage.quotaWeekRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quotaWeekResetAt, includesDate: true))
             if let lowQuotaText {
                 Text(lowQuotaText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(AgentPulseColors.attention)
                     .lineLimit(1)
             }
             DividerLine(settings: settings)
             Text("工具调用 · \(agent.toolStats.total) 次")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(settings.primaryText(system: colorScheme).opacity(0.68))
             metricRow("终端命令", "\(agent.toolStats.terminalCommands)")
             metricRow("修改文件", "\(agent.toolStats.fileChanges)")
@@ -115,23 +116,23 @@ public struct FloatingCapsuleView: View {
             .buttonStyle(.borderedProminent)
             .tint(settings.primaryText(system: colorScheme).opacity(0.14))
         }
-        .padding(.top, 12)
+        .padding(.top, 9)
     }
 
     private func metricRow(_ label: String, _ value: String, title: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             if let title {
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(settings.primaryText(system: colorScheme).opacity(0.72))
             }
             HStack {
                 Text(label)
-                    .font(.system(size: 13))
+                    .font(.system(size: 11))
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
                 Spacer()
                 Text(value)
-                    .font(.system(size: 14, weight: .medium).monospacedDigit())
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
             }
         }
     }
@@ -139,11 +140,11 @@ public struct FloatingCapsuleView: View {
     private func quotaRow(_ label: String, value: Int, detail: String?) -> some View {
         let accent = quotaAccent(value)
         return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Text(label)
-                    .font(.system(size: 13))
+                    .font(.system(size: 11))
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
-                    .frame(width: 42, alignment: .leading)
+                    .frame(width: 36, alignment: .leading)
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
                         Capsule().fill(settings.dividerColor(system: colorScheme))
@@ -152,18 +153,18 @@ public struct FloatingCapsuleView: View {
                             .frame(width: quotaBarWidth(totalWidth: geometry.size.width, value: value))
                     }
                 }
-                .frame(height: 8)
+                .frame(height: 6)
                 Text("\(value)%")
-                    .font(.system(size: 13).monospacedDigit())
+                    .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(accent)
-                    .frame(width: 38, alignment: .trailing)
+                    .frame(width: 32, alignment: .trailing)
             }
             if let detail {
                 Text(detail)
-                    .font(.system(size: 11))
+                    .font(.system(size: 10))
                     .foregroundStyle(settings.secondaryText(system: colorScheme).opacity(0.82))
                     .lineLimit(1)
-                    .padding(.leading, 52)
+                    .padding(.leading, 44)
             }
         }
     }
@@ -191,10 +192,11 @@ public struct FloatingCapsuleView: View {
         let percent = value ?? 0
         let accent = quotaAccent(percent)
         return Text("\(percent)%")
-            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+            .font(.system(size: 10, weight: .semibold).monospacedDigit())
             .foregroundStyle(accent)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+            .frame(minWidth: 34)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
             .background(accent.opacity(0.08), in: Capsule())
             .overlay(Capsule().stroke(accent.opacity(0.82), lineWidth: 1))
             .help(quotaBadgeHelp(percent: percent))
@@ -271,19 +273,19 @@ private struct StatusDot: View {
         ZStack {
             if signal.pulsePeriod > 0 {
                 Circle()
-                    .stroke(signal.pulseColor.opacity(phase ? 0.05 : 0.42), lineWidth: phase ? 1 : 3)
-                    .frame(width: phase ? outerSize : 14, height: phase ? outerSize : 14)
+                    .stroke(signal.pulseColor.opacity(phase ? 0.05 : 0.42), lineWidth: phase ? 1 : 2.2)
+                    .frame(width: phase ? outerSize : coreSize, height: phase ? outerSize : coreSize)
                     .scaleEffect(phase ? 1.0 : 0.72)
                 Circle()
-                    .stroke(signal.pulseColor.opacity(phase ? 0.02 : 0.26), lineWidth: 2)
-                    .frame(width: phase ? outerSize + 12 : 16, height: phase ? outerSize + 12 : 16)
+                    .stroke(signal.pulseColor.opacity(phase ? 0.02 : 0.26), lineWidth: 1.5)
+                    .frame(width: phase ? outerSize + outerPadding : coreSize + 2, height: phase ? outerSize + outerPadding : coreSize + 2)
                     .scaleEffect(phase ? 1.0 : 0.68)
             }
             Circle()
                 .fill(signal.pulseColor)
-                .frame(width: compact ? 10 : 14, height: compact ? 10 : 14)
+                .frame(width: compact ? 7 : 11, height: compact ? 7 : 11)
         }
-        .frame(width: compact ? 20 : 34, height: compact ? 20 : 34)
+        .frame(width: compact ? 14 : 26, height: compact ? 14 : 26)
         .opacity(signal == .idle ? 0.62 : 1)
             .onAppear { animate() }
             .onChange(of: signal) { _, _ in animate() }
@@ -299,12 +301,20 @@ private struct StatusDot: View {
 
     private var outerSize: CGFloat {
         switch signal {
-        case .attention: 34
-        case .thinking: 30
-        case .working: 28
-        case .done: 24
-        case .idle: 14
+        case .attention: compact ? 20 : 26
+        case .thinking: compact ? 17 : 23
+        case .working: compact ? 16 : 22
+        case .done: compact ? 14 : 19
+        case .idle: compact ? 8 : 11
         }
+    }
+
+    private var coreSize: CGFloat {
+        compact ? 8 : 11
+    }
+
+    private var outerPadding: CGFloat {
+        compact ? 6 : 9
     }
 }
 

@@ -8,7 +8,7 @@ A native macOS menu bar app for monitoring Codex usage, quota and activity.
 - Token Tracking
 - Cost Tracking
 - Quota Monitoring
-- Usage Center
+- 用量中心
 - Native macOS Experience
 - Light & Dark Mode
 
@@ -37,9 +37,13 @@ AgentPulse does not upload data to third-party servers.
 
 ### v1.0.1
 
-- GitHub Release Check
+- Agent 日志
 
 ### v1.0.2
+
+- GitHub Release Check
+
+### v1.0.3
 
 - Auto Update
 

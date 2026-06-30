@@ -18,8 +18,11 @@ public final class AgentPulseStore: ObservableObject {
     private var lastUsageScanAt: Date?
     private var forceNextUsageScan = false
     private var codexRefreshInFlight = false
+    private var hasObservedCodexStateThisRun = false
     private let codexRefreshQueue = DispatchQueue(label: "app.agentpulse.codex-session-refresh", qos: .utility)
     private let usageScanInterval: TimeInterval = 45
+    private let activeTimeMaxIncrement: TimeInterval = 5
+    private let sessionMergeWindow: TimeInterval = 5 * 60
     private let fallbackQuota5hTokenBudget = 50_000_000
     private let fallbackQuotaWeekTokenBudget = 500_000_000
 
@@ -179,36 +182,48 @@ public final class AgentPulseStore: ObservableObject {
         let codex = agents.first(where: { $0.kind == .codex })
         let usage = codex?.usage
         return """
-        AgentPulse diagnostics
-        Monitoring paused: \(settings.monitoringPaused)
-        Floating window: \(settings.showFloatingWindow)
-        Codex enabled: \(settings.codexMonitoringEnabled)
-        Codex status: \(codex?.signal.title ?? "unknown") · \(codex?.currentCommand ?? "none")
-        Codex status reason: \(codex?.statusReason ?? "unknown")
-        Codex status age: \(codexStatusAgeSummary(codex))
-        Today tokens: \(usage?.todayTokens.map(String.init) ?? "unknown")
-        30d tokens: \(usage?.thirtyDayTokens.map(String.init) ?? "unknown")
-        Recent daily tokens: \(dailyTokenSummary(usage?.dailyTokenUsage ?? []))
-        Usage scanned at: \(usage?.usageScannedAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-        Input/cached/output: \(tokenBreakdownSummary(usage))
-        Token source: \(usage?.tokenDataSource ?? "~/.codex/sessions JSONL")
-        Cost source: \(usage?.costDataSource ?? costDataSourceDescription)
-        Quota source: \(usage?.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 token 临时参考")
-        Top models: \(topModelSummary(usage?.modelTokenUsage ?? []))
-        Tool stats: \(toolStatsSummary(codex?.toolStats ?? ToolStats()))
-        5h quota remaining: \(usage?.quota5hRemainingPercent.map { "\($0)%" } ?? "unknown")
-        5h quota reset: \(usage?.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-        Week quota remaining: \(usage?.quotaWeekRemainingPercent.map { "\($0)%" } ?? "unknown")
-        Week quota reset: \(usage?.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-        Quota last error: \(usage?.quotaLastError ?? "none")
-        Scanned usage files: \(usage?.scannedFileCount.map(String.init) ?? "0")
-        Latest session: \(usage?.latestSessionPath ?? "unknown")
-        Latest session modified: \(usage?.latestSessionModifiedAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-        Usage cache schema: \(usageCache.schemaVersion)
-        State file: \(paths.state.path)
-        Settings file: \(paths.settings.path)
-        Usage cache: \(paths.usageCache.path)
-        Codex sessions: \(codexSessionRoot.path)
+        \(AppStrings.Diagnostics.title)
+        \(AppStrings.Diagnostics.monitoringPaused): \(settings.monitoringPaused)
+        \(AppStrings.Diagnostics.floatingWindow): \(settings.showFloatingWindow)
+        \(AppStrings.Diagnostics.codexEnabled): \(settings.codexMonitoringEnabled)
+        \(AppStrings.Diagnostics.codexStatus): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown) · \(codex?.currentCommand ?? AppStrings.Diagnostics.none)
+        \(AppStrings.Diagnostics.codexStatusReason): \(codex?.statusReason ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.codexStatusAge): \(codexStatusAgeSummary(codex))
+        \(AppStrings.Diagnostics.currentSignal): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.previousSignal): \(signalTitle(usage?.previousSignal))
+        \(AppStrings.Diagnostics.lastActiveSignal): \(signalTitle(usage?.lastActiveSignal))
+        \(AppStrings.Diagnostics.lastRefresh): previous=\(signalTitle(usage?.lastRefreshPreviousSignal)), current=\(signalTitle(usage?.lastRefreshCurrentSignal)), increment=\(durationSummary(usage?.lastRefreshIncrementSeconds ?? 0))
+        \(AppStrings.Diagnostics.sessionMergeWindow): 5m
+        \(AppStrings.Diagnostics.lastSessionActivity): \(usage?.lastSessionActivityAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.none)
+        \(AppStrings.Diagnostics.willCreateNewSession): \(willCreateNewSessionSummary(usage))
+        \(AppStrings.Diagnostics.sessionCreateReason): \(usage?.sessionCreateReason ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.currentSessionStartedAt): \(usage?.currentSessionStartedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.none)
+        \(AppStrings.Diagnostics.todayActiveTime): \(durationSummary(usage?.todayActiveSeconds ?? 0))
+        \(AppStrings.Diagnostics.todaySessions): \(usage.map { String($0.todaySessionCount) } ?? "0")
+        \(AppStrings.Diagnostics.lastActiveIncrement): \(durationSummary(usage?.lastActiveIncrementSeconds ?? 0))
+        \(AppStrings.Diagnostics.todayTokens): \(usage?.todayTokens.map(String.init) ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.thirtyDayTokens): \(usage?.thirtyDayTokens.map(String.init) ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.recentDailyTokens): \(dailyTokenSummary(usage?.dailyTokenUsage ?? []))
+        \(AppStrings.Diagnostics.usageScannedAt): \(usage?.usageScannedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.tokenBreakdown): \(tokenBreakdownSummary(usage))
+        \(AppStrings.Diagnostics.tokenSource): \(usage?.tokenDataSource ?? "~/.codex/sessions JSONL")
+        \(AppStrings.Diagnostics.costSource): \(usage?.costDataSource ?? costDataSourceDescription)
+        \(AppStrings.Diagnostics.quotaSource): \(usage?.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 Token 临时参考")
+        \(AppStrings.Diagnostics.topModels): \(topModelSummary(usage?.modelTokenUsage ?? []))
+        \(AppStrings.Diagnostics.toolStats): \(toolStatsSummary(codex?.toolStats ?? ToolStats()))
+        \(AppStrings.Diagnostics.quota5hRemaining): \(usage?.quota5hRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.quota5hReset): \(usage?.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.weekQuotaRemaining): \(usage?.quotaWeekRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.weekQuotaReset): \(usage?.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.quotaLastError): \(usage?.quotaLastError ?? AppStrings.Diagnostics.none)
+        \(AppStrings.Diagnostics.scannedUsageFiles): \(usage?.scannedFileCount.map(String.init) ?? "0")
+        \(AppStrings.Diagnostics.latestSession): \(usage?.latestSessionPath ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.latestSessionModified): \(usage?.latestSessionModifiedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+        \(AppStrings.Diagnostics.usageCacheSchema): \(usageCache.schemaVersion)
+        \(AppStrings.Diagnostics.stateFile): \(paths.state.path)
+        \(AppStrings.Diagnostics.settingsFile): \(paths.settings.path)
+        \(AppStrings.Diagnostics.usageCache): \(paths.usageCache.path)
+        \(AppStrings.Diagnostics.codexSessions): \(codexSessionRoot.path)
         """
     }
 
@@ -243,7 +258,15 @@ public final class AgentPulseStore: ObservableObject {
             upsert(AgentSnapshot(kind: .codex, signal: .idle, currentCommand: "未发现 Codex 会话日志", updatedAt: Date()))
             return
         }
-        preserveWhamQuota(from: agents.first(where: { $0.kind == .codex })?.usage ?? UsageSnapshot(), into: &snapshot.usage)
+        let existingCodex = agents.first(where: { $0.kind == .codex })
+        preserveWhamQuota(from: existingCodex?.usage ?? UsageSnapshot(), into: &snapshot.usage)
+        applyWorkingTime(
+            existing: existingCodex,
+            to: &snapshot,
+            at: Date(),
+            allowIncrement: hasObservedCodexStateThisRun
+        )
+        hasObservedCodexStateThisRun = true
         if let updatedCache = refresh.usageCache {
             usageCache = updatedCache
             try? usageCacheStore.save(usageCache)
@@ -343,8 +366,127 @@ public final class AgentPulseStore: ObservableObject {
         usage.quotaLastErrorAt = existing.quotaLastErrorAt
     }
 
+    private func applyWorkingTime(existing: AgentSnapshot?, to snapshot: inout AgentSnapshot, at now: Date, allowIncrement: Bool) {
+        let todayKey = Self.dayKey(now)
+        var usage = snapshot.usage
+        let existingUsage = existing?.usage ?? UsageSnapshot()
+        if existingUsage.activeTimeDate == todayKey {
+            usage.activeTimeDate = todayKey
+            usage.todayActiveSeconds = existingUsage.todayActiveSeconds
+            usage.todaySessionCount = existingUsage.todaySessionCount
+            usage.currentSessionStartedAt = existingUsage.currentSessionStartedAt
+            usage.lastSessionActivityAt = existingUsage.lastSessionActivityAt
+            usage.sessionCreateReason = existingUsage.sessionCreateReason
+            usage.todayHourlyActiveSeconds = normalizedHourlyActiveSeconds(existingUsage.todayHourlyActiveSeconds)
+            usage.lastActiveIncrementSeconds = 0
+            usage.previousSignal = existingUsage.previousSignal
+            usage.lastActiveSignal = existingUsage.lastActiveSignal
+            usage.lastRefreshPreviousSignal = existingUsage.lastRefreshPreviousSignal
+            usage.lastRefreshCurrentSignal = existingUsage.lastRefreshCurrentSignal
+            usage.lastRefreshIncrementSeconds = 0
+        } else {
+            usage.activeTimeDate = todayKey
+            usage.todayActiveSeconds = 0
+            usage.todaySessionCount = 0
+            usage.currentSessionStartedAt = nil
+            usage.lastSessionActivityAt = nil
+            usage.sessionCreateReason = nil
+            usage.todayHourlyActiveSeconds = Array(repeating: 0, count: 24)
+            usage.lastActiveIncrementSeconds = 0
+            usage.previousSignal = nil
+            usage.lastActiveSignal = nil
+            usage.lastRefreshPreviousSignal = nil
+            usage.lastRefreshCurrentSignal = nil
+            usage.lastRefreshIncrementSeconds = 0
+        }
+
+        if allowIncrement, isActiveTimeSignal(existing?.signal) {
+            addActiveInterval(from: existing?.updatedAt ?? now, to: now, into: &usage)
+            if usage.lastActiveIncrementSeconds > 0 {
+                usage.lastActiveSignal = existing?.signal
+            }
+        }
+
+        if isActiveTimeSignal(snapshot.signal) {
+            let hadPreviousSession = usage.lastSessionActivityAt != nil
+            let canMerge = canMergeSession(lastActivityAt: usage.lastSessionActivityAt, now: now)
+            if !hadPreviousSession {
+                usage.todaySessionCount += 1
+                usage.currentSessionStartedAt = now
+                usage.sessionCreateReason = "No Previous Session"
+            } else if !canMerge {
+                usage.todaySessionCount += 1
+                usage.currentSessionStartedAt = now
+                usage.sessionCreateReason = "Session Timeout (>5m)"
+            } else if usage.currentSessionStartedAt == nil {
+                usage.currentSessionStartedAt = usage.lastSessionActivityAt ?? now
+                usage.sessionCreateReason = allowIncrement ? "Merge Existing Session" : "First Observation Merged"
+            } else {
+                usage.sessionCreateReason = allowIncrement ? "Merge Existing Session" : "First Observation Merged"
+            }
+            usage.lastSessionActivityAt = now
+        } else {
+            if !canMergeSession(lastActivityAt: usage.lastSessionActivityAt, now: now) {
+                usage.currentSessionStartedAt = nil
+            }
+        }
+
+        usage.previousSignal = existing?.signal
+        usage.lastRefreshPreviousSignal = existing?.signal
+        usage.lastRefreshCurrentSignal = snapshot.signal
+        usage.lastRefreshIncrementSeconds = usage.lastActiveIncrementSeconds
+        snapshot.usage = usage
+    }
+
+    private func isActiveTimeSignal(_ signal: AgentSignal?) -> Bool {
+        signal == .thinking || signal == .working
+    }
+
+    private func canMergeSession(lastActivityAt: Date?, now: Date) -> Bool {
+        guard let lastActivityAt else { return false }
+        return now.timeIntervalSince(lastActivityAt) <= sessionMergeWindow
+    }
+
+    private func addActiveInterval(from start: Date, to end: Date, into usage: inout UsageSnapshot) {
+        let calendar = Calendar.current
+        let startOfToday = calendar.startOfDay(for: end)
+        var cursor = max(start, startOfToday)
+        guard end > cursor else { return }
+        let cappedEnd = min(end, cursor.addingTimeInterval(activeTimeMaxIncrement))
+        usage.todayHourlyActiveSeconds = normalizedHourlyActiveSeconds(usage.todayHourlyActiveSeconds)
+        var added: TimeInterval = 0
+
+        while cursor < cappedEnd {
+            let hour = calendar.component(.hour, from: cursor)
+            let nextHour = calendar.nextDate(after: cursor, matching: DateComponents(minute: 0, second: 0), matchingPolicy: .nextTime) ?? end
+            let segmentEnd = min(cappedEnd, nextHour)
+            let seconds = max(0, segmentEnd.timeIntervalSince(cursor))
+            usage.todayActiveSeconds += seconds
+            added += seconds
+            if hour >= 0 && hour < usage.todayHourlyActiveSeconds.count {
+                usage.todayHourlyActiveSeconds[hour] += seconds
+            }
+            cursor = segmentEnd
+        }
+        usage.lastActiveIncrementSeconds = added
+    }
+
+    private func normalizedHourlyActiveSeconds(_ values: [TimeInterval]) -> [TimeInterval] {
+        if values.count == 24 { return values }
+        if values.count > 24 { return Array(values.prefix(24)) }
+        return values + Array(repeating: 0, count: 24 - values.count)
+    }
+
+    private static func dayKey(_ date: Date, calendar: Calendar = Calendar.current) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
     private func topModelSummary(_ models: [UsageSnapshot.ModelTokenUsage]) -> String {
-        guard !models.isEmpty else { return "unknown" }
+        guard !models.isEmpty else { return AppStrings.Diagnostics.unknown }
         let total = max(models.reduce(0) { $0 + $1.tokens }, 1)
         return models.prefix(3).map { item in
             let percent = Int((Double(item.tokens) / Double(total) * 100).rounded())
@@ -353,7 +495,7 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private func dailyTokenSummary(_ daily: [UsageSnapshot.DailyTokenUsage]) -> String {
-        guard !daily.isEmpty else { return "unknown" }
+        guard !daily.isEmpty else { return AppStrings.Diagnostics.unknown }
         return daily.suffix(5)
             .map { "\($0.date)=\($0.tokens)" }
             .joined(separator: ", ")
@@ -364,18 +506,31 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private func codexStatusAgeSummary(_ codex: AgentSnapshot?) -> String {
-        guard let codex else { return "unknown" }
+        guard let codex else { return AppStrings.Diagnostics.unknown }
         let seconds = max(0, Int(Date().timeIntervalSince(codex.updatedAt)))
         return "\(seconds)s"
     }
 
+    private func durationSummary(_ seconds: TimeInterval) -> String {
+        String(format: "%.1fs", max(0, seconds))
+    }
+
+    private func signalTitle(_ signal: AgentSignal?) -> String {
+        signal?.title ?? AppStrings.Diagnostics.unknown
+    }
+
+    private func willCreateNewSessionSummary(_ usage: UsageSnapshot?) -> String {
+        guard let usage else { return AppStrings.Diagnostics.unknown }
+        return canMergeSession(lastActivityAt: usage.lastSessionActivityAt, now: Date()) ? "No" : "Yes"
+    }
+
     private func tokenBreakdownSummary(_ usage: UsageSnapshot?) -> String {
-        guard let usage else { return "unknown" }
+        guard let usage else { return AppStrings.Diagnostics.unknown }
         let input = usage.inputTokens ?? 0
         let cached = usage.cachedInputTokens ?? 0
         let output = usage.outputTokens ?? 0
-        guard input + cached + output > 0 else { return "unknown" }
-        return "input \(input), cached \(cached), output \(output)"
+        guard input + cached + output > 0 else { return AppStrings.Diagnostics.unknown }
+        return "输入 \(input), 缓存输入 \(cached), 输出 \(output)"
     }
 
     private func refreshCodexQuota(force: Bool) {
@@ -393,20 +548,7 @@ public final class AgentPulseStore: ObservableObject {
                 await MainActor.run {
                     isRefreshingCodexQuota = false
                     guard let index = agents.firstIndex(where: { $0.kind == .codex }) else { return }
-                    if let value = quota.quota5hRemainingPercent {
-                        agents[index].usage.quota5hRemainingPercent = value
-                    }
-                    if let value = quota.quotaWeekRemainingPercent {
-                        agents[index].usage.quotaWeekRemainingPercent = value
-                    }
-                    agents[index].usage.quota5hResetAt = quota.quota5hResetAt
-                    agents[index].usage.quotaWeekResetAt = quota.quotaWeekResetAt
-                    agents[index].usage.quota5hWindowSeconds = quota.quota5hWindowSeconds
-                    agents[index].usage.quotaWeekWindowSeconds = quota.quotaWeekWindowSeconds
-                    agents[index].usage.quotaDataSource = "Codex WHAM 实时接口"
-                    agents[index].usage.quotaUpdatedAt = quota.updatedAt
-                    agents[index].usage.quotaLastError = nil
-                    agents[index].usage.quotaLastErrorAt = nil
+                    applyCodexQuota(quota, to: &agents[index].usage)
                     persist()
                 }
             } catch {
@@ -419,6 +561,32 @@ public final class AgentPulseStore: ObservableObject {
                 }
             }
         }
+    }
+
+    private func applyCodexQuota(_ quota: CodexQuotaSnapshot, to usage: inout UsageSnapshot) {
+        let fiveHourResetChanged = usage.quota5hResetAt != quota.quota5hResetAt
+        let weekResetChanged = usage.quotaWeekResetAt != quota.quotaWeekResetAt
+
+        if let value = quota.quota5hRemainingPercent {
+            usage.quota5hRemainingPercent = value
+        } else if fiveHourResetChanged {
+            usage.quota5hRemainingPercent = nil
+        }
+
+        if let value = quota.quotaWeekRemainingPercent {
+            usage.quotaWeekRemainingPercent = value
+        } else if weekResetChanged {
+            usage.quotaWeekRemainingPercent = nil
+        }
+
+        usage.quota5hResetAt = quota.quota5hResetAt
+        usage.quotaWeekResetAt = quota.quotaWeekResetAt
+        usage.quota5hWindowSeconds = quota.quota5hWindowSeconds
+        usage.quotaWeekWindowSeconds = quota.quotaWeekWindowSeconds
+        usage.quotaDataSource = "Codex WHAM 实时接口"
+        usage.quotaUpdatedAt = quota.updatedAt
+        usage.quotaLastError = nil
+        usage.quotaLastErrorAt = nil
     }
 
     private func readableQuotaError(_ error: Error) -> String {
@@ -444,6 +612,7 @@ public final class AgentPulseStore: ObservableObject {
         }
         agents = agents.map { snapshot in
             var paused = snapshot
+            applyWorkingTime(existing: snapshot, to: &paused, at: Date(), allowIncrement: hasObservedCodexStateThisRun)
             paused.signal = .idle
             paused.currentCommand = "监控已暂停"
             paused.updatedAt = Date()
@@ -588,13 +757,14 @@ private enum CodexRefreshWorker {
         var usage = snapshot.usage
         usage.tokenDataSource = "~/.codex/sessions JSONL"
         usage.costDataSource = costDataSource
+        usage.toolStats = parse.toolStats
         usage.scannedFileCount = usageCache.files.count
         usage.latestSessionPath = selected.file.path
         usage.latestSessionModifiedAt = latestModificationDate(selected.file)
 
         var updatedCache: UsageCache?
         if shouldScanUsage {
-            let scan = CodexUsageScanner.scanDailyTokens(
+            let scan = CodexUsageScanner.scanUsage(
                 root: sessionRoot,
                 options: CodexUsageScanner.Options(
                     estimateInternalModelCost: settings.estimateCodexInternalCost,
@@ -606,6 +776,7 @@ private enum CodexRefreshWorker {
             let daily = scan.daily
             usage.scannedFileCount = scan.cache.files.count
             usage.usageScannedAt = Date()
+            usage.journalEntries = scan.journalEntries
             if !daily.isEmpty {
                 usage.dailyTokenUsage = daily
                 usage.modelTokenUsage = scan.models

@@ -131,6 +131,26 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         }
     }
 
+    public struct JournalEntry: Codable, Equatable, Identifiable, Sendable {
+        public var id: String
+        public var startedAt: Date
+        public var endedAt: Date
+        public var durationSeconds: TimeInterval
+        public var tokens: Int
+        public var cost: Decimal?
+        public var sourcePath: String
+
+        public init(id: String, startedAt: Date, endedAt: Date, tokens: Int, cost: Decimal? = nil, sourcePath: String) {
+            self.id = id
+            self.startedAt = startedAt
+            self.endedAt = endedAt
+            self.durationSeconds = max(0, endedAt.timeIntervalSince(startedAt))
+            self.tokens = tokens
+            self.cost = cost
+            self.sourcePath = sourcePath
+        }
+    }
+
     public var todayCost: Decimal?
     public var todayTokens: Int?
     public var thirtyDayCost: Decimal?
@@ -157,6 +177,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var usageScannedAt: Date?
     public var latestSessionPath: String?
     public var latestSessionModifiedAt: Date?
+    public var activeTimeDate: String?
+    public var todayActiveSeconds: TimeInterval
+    public var todaySessionCount: Int
+    public var currentSessionStartedAt: Date?
+    public var lastSessionActivityAt: Date?
+    public var sessionCreateReason: String?
+    public var todayHourlyActiveSeconds: [TimeInterval]
+    public var journalEntries: [JournalEntry]
+    public var toolStats: ToolStats
+    public var lastActiveIncrementSeconds: TimeInterval
+    public var previousSignal: AgentSignal?
+    public var lastActiveSignal: AgentSignal?
+    public var lastRefreshPreviousSignal: AgentSignal?
+    public var lastRefreshCurrentSignal: AgentSignal?
+    public var lastRefreshIncrementSeconds: TimeInterval
 
     enum CodingKeys: String, CodingKey {
         case todayCost
@@ -185,6 +220,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         case usageScannedAt
         case latestSessionPath
         case latestSessionModifiedAt
+        case activeTimeDate
+        case todayActiveSeconds
+        case todaySessionCount
+        case currentSessionStartedAt
+        case lastSessionActivityAt
+        case sessionCreateReason
+        case todayHourlyActiveSeconds
+        case journalEntries
+        case toolStats
+        case lastActiveIncrementSeconds
+        case previousSignal
+        case lastActiveSignal
+        case lastRefreshPreviousSignal
+        case lastRefreshCurrentSignal
+        case lastRefreshIncrementSeconds
     }
 
     public init(
@@ -213,7 +263,22 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         scannedFileCount: Int? = nil,
         usageScannedAt: Date? = nil,
         latestSessionPath: String? = nil,
-        latestSessionModifiedAt: Date? = nil
+        latestSessionModifiedAt: Date? = nil,
+        activeTimeDate: String? = nil,
+        todayActiveSeconds: TimeInterval = 0,
+        todaySessionCount: Int = 0,
+        currentSessionStartedAt: Date? = nil,
+        lastSessionActivityAt: Date? = nil,
+        sessionCreateReason: String? = nil,
+        todayHourlyActiveSeconds: [TimeInterval] = Array(repeating: 0, count: 24),
+        journalEntries: [JournalEntry] = [],
+        toolStats: ToolStats = ToolStats(),
+        lastActiveIncrementSeconds: TimeInterval = 0,
+        previousSignal: AgentSignal? = nil,
+        lastActiveSignal: AgentSignal? = nil,
+        lastRefreshPreviousSignal: AgentSignal? = nil,
+        lastRefreshCurrentSignal: AgentSignal? = nil,
+        lastRefreshIncrementSeconds: TimeInterval = 0
     ) {
         self.todayCost = todayCost
         self.todayTokens = todayTokens
@@ -241,6 +306,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.usageScannedAt = usageScannedAt
         self.latestSessionPath = latestSessionPath
         self.latestSessionModifiedAt = latestSessionModifiedAt
+        self.activeTimeDate = activeTimeDate
+        self.todayActiveSeconds = todayActiveSeconds
+        self.todaySessionCount = todaySessionCount
+        self.currentSessionStartedAt = currentSessionStartedAt
+        self.lastSessionActivityAt = lastSessionActivityAt
+        self.sessionCreateReason = sessionCreateReason
+        self.todayHourlyActiveSeconds = Self.normalizedHourlyActiveSeconds(todayHourlyActiveSeconds)
+        self.journalEntries = journalEntries
+        self.toolStats = toolStats
+        self.lastActiveIncrementSeconds = lastActiveIncrementSeconds
+        self.previousSignal = previousSignal
+        self.lastActiveSignal = lastActiveSignal
+        self.lastRefreshPreviousSignal = lastRefreshPreviousSignal
+        self.lastRefreshCurrentSignal = lastRefreshCurrentSignal
+        self.lastRefreshIncrementSeconds = lastRefreshIncrementSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -271,6 +351,29 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         usageScannedAt = try container.decodeIfPresent(Date.self, forKey: .usageScannedAt)
         latestSessionPath = try container.decodeIfPresent(String.self, forKey: .latestSessionPath)
         latestSessionModifiedAt = try container.decodeIfPresent(Date.self, forKey: .latestSessionModifiedAt)
+        activeTimeDate = try container.decodeIfPresent(String.self, forKey: .activeTimeDate)
+        todayActiveSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .todayActiveSeconds) ?? 0
+        todaySessionCount = try container.decodeIfPresent(Int.self, forKey: .todaySessionCount) ?? 0
+        currentSessionStartedAt = try container.decodeIfPresent(Date.self, forKey: .currentSessionStartedAt)
+        lastSessionActivityAt = try container.decodeIfPresent(Date.self, forKey: .lastSessionActivityAt)
+        sessionCreateReason = try container.decodeIfPresent(String.self, forKey: .sessionCreateReason)
+        todayHourlyActiveSeconds = Self.normalizedHourlyActiveSeconds(
+            try container.decodeIfPresent([TimeInterval].self, forKey: .todayHourlyActiveSeconds) ?? []
+        )
+        journalEntries = try container.decodeIfPresent([JournalEntry].self, forKey: .journalEntries) ?? []
+        toolStats = try container.decodeIfPresent(ToolStats.self, forKey: .toolStats) ?? ToolStats()
+        lastActiveIncrementSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .lastActiveIncrementSeconds) ?? 0
+        previousSignal = try container.decodeIfPresent(AgentSignal.self, forKey: .previousSignal)
+        lastActiveSignal = try container.decodeIfPresent(AgentSignal.self, forKey: .lastActiveSignal)
+        lastRefreshPreviousSignal = try container.decodeIfPresent(AgentSignal.self, forKey: .lastRefreshPreviousSignal)
+        lastRefreshCurrentSignal = try container.decodeIfPresent(AgentSignal.self, forKey: .lastRefreshCurrentSignal)
+        lastRefreshIncrementSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .lastRefreshIncrementSeconds) ?? 0
+    }
+
+    private static func normalizedHourlyActiveSeconds(_ values: [TimeInterval]) -> [TimeInterval] {
+        if values.count == 24 { return values }
+        if values.count > 24 { return Array(values.prefix(24)) }
+        return values + Array(repeating: 0, count: 24 - values.count)
     }
 }
 

@@ -14,6 +14,8 @@ public enum CodexUsageScanner {
         var modelCosts: [String: Decimal] = [:]
         var dailyTokens: [String: Int] = [:]
         var dailyCosts: [String: Decimal] = [:]
+        var firstEventAt: Date?
+        var lastEventAt: Date?
 
         mutating func add(_ breakdown: TokenBreakdown, cost: Decimal?, model: String? = nil, day: String? = nil) {
             self.tokens += breakdown.total
@@ -73,6 +75,7 @@ public enum CodexUsageScanner {
                 costs: other.modelCosts
             )
             addDailyTokens(other.dailyTokens, costs: other.dailyCosts)
+            noteEventRange(first: other.firstEventAt, last: other.lastEventAt)
         }
 
         mutating func addDailyTokens(_ tokens: [String: Int], costs: [String: Decimal]) {
@@ -103,6 +106,25 @@ public enum CodexUsageScanner {
                 modelCosts[model, default: 0] += value
             }
         }
+
+        mutating func noteEvent(at date: Date, day: String, fallbackDay: String) {
+            guard day == fallbackDay else { return }
+            if firstEventAt == nil || date < firstEventAt! {
+                firstEventAt = date
+            }
+            if lastEventAt == nil || date > lastEventAt! {
+                lastEventAt = date
+            }
+        }
+
+        mutating func noteEventRange(first: Date?, last: Date?) {
+            if let first, firstEventAt == nil || first < firstEventAt! {
+                firstEventAt = first
+            }
+            if let last, lastEventAt == nil || last > lastEventAt! {
+                lastEventAt = last
+            }
+        }
     }
 
     public struct Options: Sendable {
@@ -120,9 +142,15 @@ public enum CodexUsageScanner {
     }
 
     public static func scanDailyTokens(root: URL, days: Int = 30, options: Options = Options(), cache: UsageCache?) -> (daily: [UsageSnapshot.DailyTokenUsage], models: [UsageSnapshot.ModelTokenUsage], cache: UsageCache) {
+        let result = scanUsage(root: root, days: days, options: options, cache: cache)
+        return (result.daily, result.models, result.cache)
+    }
+
+    public static func scanUsage(root: URL, days: Int = 30, options: Options = Options(), cache: UsageCache?) -> (daily: [UsageSnapshot.DailyTokenUsage], models: [UsageSnapshot.ModelTokenUsage], journalEntries: [UsageSnapshot.JournalEntry], cache: UsageCache) {
         let calendar = Calendar(identifier: .gregorian)
         var totals: [String: FileUsage] = [:]
         var modelTotals = FileUsage()
+        var journalEntries: [UsageSnapshot.JournalEntry] = []
         var nextCache = cache ?? UsageCache()
         if nextCache.schemaVersion < UsageCache.currentSchemaVersion {
             nextCache = UsageCache()
@@ -146,6 +174,10 @@ public enum CodexUsageScanner {
                    entry.modifiedAt == metadata.modifiedAt,
                    entry.size == metadata.size,
                    entry.hasCurrentUsageDetails {
+                    if key == dayKey(Date()) {
+                        let fileUsage = usage(in: file, options: options, fallbackDay: key)
+                        appendJournalEntry(from: fileUsage, path: path, into: &journalEntries)
+                    }
                     if entry.dailyTokens.isEmpty {
                         totals[entry.day, default: FileUsage()].addCachedEntry(entry)
                     } else {
@@ -160,6 +192,9 @@ public enum CodexUsageScanner {
                     continue
                 }
                 let fileUsage = usage(in: file, options: options, fallbackDay: key)
+                if key == dayKey(Date()) {
+                    appendJournalEntry(from: fileUsage, path: path, into: &journalEntries)
+                }
                 if fileUsage.dailyTokens.isEmpty {
                     totals[key, default: FileUsage()].merge(fileUsage)
                 } else {
@@ -219,7 +254,12 @@ public enum CodexUsageScanner {
                     cost: modelTotals.modelCosts[$0.key]
                 )
             }
-        return (daily, models, nextCache)
+        return (
+            daily,
+            models,
+            journalEntries.sorted { $0.endedAt > $1.endedAt },
+            nextCache
+        )
     }
 
     private static func fileMetadata(_ url: URL) -> (modifiedAt: Date, size: Int64) {
@@ -227,6 +267,24 @@ public enum CodexUsageScanner {
         return (
             values?.contentModificationDate ?? .distantPast,
             Int64(values?.fileSize ?? 0)
+        )
+    }
+
+    private static func appendJournalEntry(from fileUsage: FileUsage, path: String, into entries: inout [UsageSnapshot.JournalEntry]) {
+        guard fileUsage.tokens > 0,
+              let startedAt = fileUsage.firstEventAt,
+              let endedAt = fileUsage.lastEventAt else {
+            return
+        }
+        entries.append(
+            UsageSnapshot.JournalEntry(
+                id: path,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                tokens: fileUsage.tokens,
+                cost: fileUsage.cost,
+                sourcePath: path
+            )
         )
     }
 
@@ -240,7 +298,11 @@ public enum CodexUsageScanner {
                 let data = String(line).data(using: .utf8),
                 let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
-            let eventDay = dayKey(fromTimestamp: object["timestamp"]) ?? fallbackDay
+            let eventDate = dateValue(object["timestamp"])
+            let eventDay = eventDate.map(dayKey) ?? dayKey(fromTimestamp: object["timestamp"]) ?? fallbackDay
+            if let eventDate {
+                usage.noteEvent(at: eventDate, day: eventDay, fallbackDay: fallbackDay)
+            }
 
             if let payload = object["payload"] as? [String: Any] {
                 lastModel = modelName(in: object) ?? lastModel
@@ -417,19 +479,23 @@ public enum CodexUsageScanner {
     }
 
     private static func dayKey(fromTimestamp value: Any?) -> String? {
-        let date: Date?
-        if let string = value as? String {
-            date = isoDate(string)
-        } else if let double = value as? Double {
-            date = Date(timeIntervalSince1970: double > 10_000_000_000 ? double / 1000 : double)
-        } else if let int = value as? Int {
-            let double = Double(int)
-            date = Date(timeIntervalSince1970: double > 10_000_000_000 ? double / 1000 : double)
-        } else {
-            date = nil
-        }
+        let date = dateValue(value)
         guard let date else { return nil }
         return dayKey(date)
+    }
+
+    private static func dateValue(_ value: Any?) -> Date? {
+        if let string = value as? String {
+            return isoDate(string)
+        }
+        if let double = value as? Double {
+            return Date(timeIntervalSince1970: double > 10_000_000_000 ? double / 1000 : double)
+        }
+        if let int = value as? Int {
+            let double = Double(int)
+            return Date(timeIntervalSince1970: double > 10_000_000_000 ? double / 1000 : double)
+        }
+        return nil
     }
 
     private static func isoDate(_ string: String) -> Date? {

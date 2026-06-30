@@ -118,8 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuUsageLines: [String] {
         guard let codex = store.agents.first(where: { $0.kind == .codex }) else { return [] }
         let today = AgentPulseFormatters.tokens(codex.usage.todayTokens)
-        let fiveHour = codex.usage.quota5hRemainingPercent.map { "\($0)%" } ?? "unknown"
-        let week = codex.usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? "unknown"
+        let fiveHour = codex.usage.quota5hRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown
+        let week = codex.usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown
         return [
             "今日 \(today)",
             "额度 5小时 \(fiveHour) · 本周 \(week)"

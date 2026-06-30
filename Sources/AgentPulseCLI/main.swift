@@ -22,10 +22,10 @@ switch arguments.first {
 case "status":
     let agents = stateStore.load(default: [])
     if agents.isEmpty {
-        print("No AgentPulse state yet.")
+        print("还没有 AgentPulse 状态。")
     } else {
         for agent in agents {
-            print("\(agent.kind.displayName): \(agent.signal.title) · \(agent.currentCommand ?? "idle")")
+            print("\(agent.kind.displayName): \(agent.signal.title) · \(agent.currentCommand ?? "空闲")")
         }
     }
 case "set":
@@ -34,7 +34,7 @@ case "set":
 	          let kind = AgentKind(rawValue: args[0]),
 	          kind != .claude,
 	          let signal = AgentSignal(rawValue: args[1]) else {
-	        print("Usage: agentpulse-cli set <codex|local> <idle|thinking|working|done|attention> [message]")
+	        print("用法：agentpulse-cli set <codex|local> <idle|thinking|working|done|attention> [message]")
 	        Foundation.exit(2)
 	    }
     let message = args.dropFirst(2).joined(separator: " ")
@@ -53,16 +53,16 @@ case "set":
         try stateStore.save(agents)
         print("\(kind.displayName) -> \(signal.title)")
     } catch {
-        fputs("Failed to write AgentPulse state: \(error.localizedDescription)\n", stderr)
+        fputs("写入 AgentPulse 状态失败：\(error.localizedDescription)\n", stderr)
         Foundation.exit(1)
     }
 case "reset-window":
     UserDefaults.standard.removeObject(forKey: "floatingPanel.x")
     UserDefaults.standard.removeObject(forKey: "floatingPanel.y")
-    print("Floating window position reset.")
+    print("悬浮窗位置已重置。")
 case "reset-usage-cache":
     try? JSONFileStore<UsageCache>(url: paths.usageCache).save(UsageCache())
-    print("Usage cache reset.")
+    print("用量缓存已重置。")
 case "diagnostics":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let usageCache = JSONFileStore<UsageCache>(url: paths.usageCache).load(default: UsageCache())
@@ -104,13 +104,13 @@ case "diagnostics":
     let cached = usage.cachedInputTokens ?? 0
     let output = usage.outputTokens ?? 0
     let topModels = models.isEmpty
-        ? "unknown"
+        ? AppStrings.Diagnostics.unknown
         : models.prefix(3).map { item in
             let percent = Int((Double(item.tokens) / Double(modelTotal) * 100).rounded())
             return "\(item.model) \(percent)%"
         }.joined(separator: ", ")
     let dailySummary = usage.dailyTokenUsage.isEmpty
-        ? "unknown"
+        ? AppStrings.Diagnostics.unknown
         : usage.dailyTokenUsage.suffix(5).map { "\($0.date)=\($0.tokens)" }.joined(separator: ", ")
     let liveToolStats: ToolStats = {
         guard let liveStatus else {
@@ -119,36 +119,48 @@ case "diagnostics":
         return liveStatus.result.toolStats
     }()
     print("""
-    AgentPulse diagnostics
-    Monitoring paused: \(settings.monitoringPaused)
-    Floating window: \(settings.showFloatingWindow)
-    Codex enabled: \(settings.codexMonitoringEnabled)
-    Codex status: \(liveStatus?.result.signal.title ?? codex?.signal.title ?? "unknown") · \(liveStatus?.result.eventMessage ?? codex?.currentCommand ?? "none")
-    Codex status reason: \(liveStatus.map { statusReason(file: $0.file, signal: $0.result.signal, age: $0.age) } ?? codex?.statusReason ?? "unknown")
-    Codex status age: \(liveStatus.map { "\(max(0, Int($0.age)))s" } ?? codex.map { "\(max(0, Int(Date().timeIntervalSince($0.updatedAt))))s" } ?? "unknown")
-    Today tokens: \(usage.todayTokens.map(String.init) ?? "unknown")
-    30d tokens: \(usage.thirtyDayTokens.map(String.init) ?? "unknown")
-    Recent daily tokens: \(dailySummary)
-    Usage scanned at: \(usage.usageScannedAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-    Input/cached/output: \(input + cached + output > 0 ? "input \(input), cached \(cached), output \(output)" : "unknown")
-    Token source: \(usage.tokenDataSource ?? "~/.codex/sessions JSONL")
-    Cost source: \(usage.costDataSource ?? costSource)
-    Quota source: \(usage.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 token 临时参考")
-    Top models: \(topModels)
-    Tool stats: terminal \(liveToolStats.terminalCommands), files \(liveToolStats.fileChanges), write_stdin \(liveToolStats.writeStdin), other \(liveToolStats.other), total \(liveToolStats.total)
-    5h quota remaining: \(usage.quota5hRemainingPercent.map { "\($0)%" } ?? "unknown")
-    5h quota reset: \(usage.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-    Week quota remaining: \(usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? "unknown")
-    Week quota reset: \(usage.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-    Quota last error: \(usage.quotaLastError ?? "none")
-    Cached usage files: \(scan.cache.files.count)
-    Latest session: \(usage.latestSessionPath ?? "unknown")
-    Latest session modified: \(usage.latestSessionModifiedAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")
-    Usage cache schema: \(scan.cache.schemaVersion)
-    State file: \(paths.state.path)
-    Settings file: \(paths.settings.path)
-    Usage cache: \(paths.usageCache.path)
-    Codex sessions: \(root.path)
+    \(AppStrings.Diagnostics.title)
+    \(AppStrings.Diagnostics.monitoringPaused): \(settings.monitoringPaused)
+    \(AppStrings.Diagnostics.floatingWindow): \(settings.showFloatingWindow)
+    \(AppStrings.Diagnostics.codexEnabled): \(settings.codexMonitoringEnabled)
+    \(AppStrings.Diagnostics.codexStatus): \(liveStatus?.result.signal.title ?? codex?.signal.title ?? AppStrings.Diagnostics.unknown) · \(liveStatus?.result.eventMessage ?? codex?.currentCommand ?? AppStrings.Diagnostics.none)
+    \(AppStrings.Diagnostics.codexStatusReason): \(liveStatus.map { statusReason(file: $0.file, signal: $0.result.signal, age: $0.age) } ?? codex?.statusReason ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.codexStatusAge): \(liveStatus.map { "\(max(0, Int($0.age)))s" } ?? codex.map { "\(max(0, Int(Date().timeIntervalSince($0.updatedAt))))s" } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.currentSignal): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.previousSignal): \(usage.previousSignal?.title ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.lastActiveSignal): \(usage.lastActiveSignal?.title ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.lastRefresh): previous=\(usage.lastRefreshPreviousSignal?.title ?? AppStrings.Diagnostics.unknown), current=\(usage.lastRefreshCurrentSignal?.title ?? AppStrings.Diagnostics.unknown), increment=\(String(format: "%.1fs", usage.lastRefreshIncrementSeconds))
+    \(AppStrings.Diagnostics.sessionMergeWindow): 5m
+    \(AppStrings.Diagnostics.lastSessionActivity): \(usage.lastSessionActivityAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.none)
+    \(AppStrings.Diagnostics.willCreateNewSession): \(usage.lastSessionActivityAt.map { Date().timeIntervalSince($0) <= 300 ? "No" : "Yes" } ?? "Yes")
+    \(AppStrings.Diagnostics.sessionCreateReason): \(usage.sessionCreateReason ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.currentSessionStartedAt): \(usage.currentSessionStartedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.none)
+    \(AppStrings.Diagnostics.todayActiveTime): \(String(format: "%.1fs", usage.todayActiveSeconds))
+    \(AppStrings.Diagnostics.todaySessions): \(usage.todaySessionCount)
+    \(AppStrings.Diagnostics.lastActiveIncrement): \(String(format: "%.1fs", usage.lastActiveIncrementSeconds))
+    \(AppStrings.Diagnostics.todayTokens): \(usage.todayTokens.map(String.init) ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.thirtyDayTokens): \(usage.thirtyDayTokens.map(String.init) ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.recentDailyTokens): \(dailySummary)
+    \(AppStrings.Diagnostics.usageScannedAt): \(usage.usageScannedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.tokenBreakdown): \(input + cached + output > 0 ? "输入 \(input), 缓存输入 \(cached), 输出 \(output)" : AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.tokenSource): \(usage.tokenDataSource ?? "~/.codex/sessions JSONL")
+    \(AppStrings.Diagnostics.costSource): \(usage.costDataSource ?? costSource)
+    \(AppStrings.Diagnostics.quotaSource): \(usage.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 Token 临时参考")
+    \(AppStrings.Diagnostics.topModels): \(topModels)
+    \(AppStrings.Diagnostics.toolStats): 终端 \(liveToolStats.terminalCommands), 文件 \(liveToolStats.fileChanges), write_stdin \(liveToolStats.writeStdin), 其他 \(liveToolStats.other), 总计 \(liveToolStats.total)
+    \(AppStrings.Diagnostics.quota5hRemaining): \(usage.quota5hRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.quota5hReset): \(usage.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.weekQuotaRemaining): \(usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.weekQuotaReset): \(usage.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.quotaLastError): \(usage.quotaLastError ?? AppStrings.Diagnostics.none)
+    \(AppStrings.Diagnostics.cachedUsageFiles): \(scan.cache.files.count)
+    \(AppStrings.Diagnostics.latestSession): \(usage.latestSessionPath ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.latestSessionModified): \(usage.latestSessionModifiedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.usageCacheSchema): \(scan.cache.schemaVersion)
+    \(AppStrings.Diagnostics.stateFile): \(paths.state.path)
+    \(AppStrings.Diagnostics.settingsFile): \(paths.settings.path)
+    \(AppStrings.Diagnostics.usageCache): \(paths.usageCache.path)
+    \(AppStrings.Diagnostics.codexSessions): \(root.path)
     """)
 case "doctor":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
@@ -172,7 +184,7 @@ case "doctor":
     print("AgentPulse doctor")
     print(check(FileManager.default.fileExists(atPath: root.path), "Codex session 目录", root.path))
     print(check(latestSession != nil, "最近 Codex session", latestSession?.lastPathComponent ?? "未发现"))
-    print(check(totalTokens > 0, "Token 扫描", "\(totalTokens) tokens / \(scan.daily.count) 天"))
+    print(check(totalTokens > 0, "Token 扫描", "\(totalTokens) Token / \(scan.daily.count) 天"))
     print(check(!scan.models.isEmpty, "模型识别", scan.models.prefix(3).map(\.model).joined(separator: ", ")))
     print(check(totalCost > 0, "费用估算", money(totalCost)))
     print(check(latestParse != nil, "状态解析", latestParse.map { "\($0.signal.title) · \($0.eventMessage)" } ?? "未解析到事件"))
@@ -223,12 +235,12 @@ case "diagnose-quota":
     do {
         let quota = try await CodexQuotaFetcher.fetch()
         print("Codex quota:")
-        print("- 5h remaining: \(quota.quota5hRemainingPercent.map(String.init) ?? "unknown")%")
-        print("- 5h reset: \(quota.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")")
-        print("- 5h window seconds: \(quota.quota5hWindowSeconds.map(String.init) ?? "unknown")")
-        print("- week remaining: \(quota.quotaWeekRemainingPercent.map(String.init) ?? "unknown")%")
-        print("- week reset: \(quota.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? "unknown")")
-        print("- week window seconds: \(quota.quotaWeekWindowSeconds.map(String.init) ?? "unknown")")
+        print("- 5 小时剩余：\(quota.quota5hRemainingPercent.map(String.init) ?? AppStrings.Diagnostics.unknown)%")
+        print("- 5 小时重置：\(quota.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)")
+        print("- 5 小时窗口秒数：\(quota.quota5hWindowSeconds.map(String.init) ?? AppStrings.Diagnostics.unknown)")
+        print("- 本周剩余：\(quota.quotaWeekRemainingPercent.map(String.init) ?? AppStrings.Diagnostics.unknown)%")
+        print("- 本周重置：\(quota.quotaWeekResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)")
+        print("- 本周窗口秒数：\(quota.quotaWeekWindowSeconds.map(String.init) ?? AppStrings.Diagnostics.unknown)")
     } catch {
         print("Codex quota fetch failed: \(error.localizedDescription)")
         Foundation.exit(1)
@@ -269,7 +281,7 @@ case "scan-usage":
     }
     print("- models:")
     if scan.models.isEmpty {
-        print("  - unknown")
+        print("  - \(AppStrings.Diagnostics.unknown)")
     } else {
         for item in scan.models.prefix(8) {
             let percent = Int((Double(item.tokens) / Double(modelTotal) * 100).rounded())
@@ -284,7 +296,7 @@ case "scan-usage":
 	      diagnose-codex        Print observed Codex payload.type values
 	      diagnose-quota        Fetch Codex WHAM quota from local auth
 	      diagnose-quota-raw    Print redacted WHAM window parse details
-	      diagnostics           Print local state, source, usage, and quota summary
+	      diagnostics           输出本地状态、来源、用量和额度摘要
 	      doctor                Run a quick health check for sessions, usage, status, and UI settings
 	      scan-usage            Scan Codex sessions and print daily/model usage
 	      status                Print current AgentPulse state

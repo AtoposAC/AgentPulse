@@ -56,7 +56,7 @@ public struct SettingsWindowView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("AgentPulse")
                         .font(.system(size: 17, weight: .semibold))
-                    Text("Local monitor")
+                    Text("本地监控")
                         .font(.caption)
                         .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 }
@@ -77,7 +77,7 @@ public struct SettingsWindowView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 StatusPill(title: "Codex", good: store.settings.codexMonitoringEnabled)
-                Text("Local / not notarized")
+                Text("本地构建 / 未公证")
                     .font(.caption2)
                     .foregroundStyle(store.settings.tertiaryText(system: colorScheme))
             }
@@ -111,12 +111,12 @@ private enum SettingsPage: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .dashboard: "总览"
-        case .agents: "Agent"
-        case .usage: "Usage Center"
-        case .connections: "连接"
-        case .preferences: "设置"
-        case .about: "关于"
+        case .dashboard: AppStrings.Pages.overview
+        case .agents: AppStrings.Pages.agents
+        case .usage: AppStrings.Pages.usageCenter
+        case .connections: AppStrings.Pages.connection
+        case .preferences: AppStrings.Pages.settings
+        case .about: AppStrings.Pages.about
         }
     }
 
@@ -248,6 +248,13 @@ private struct AgentsPage: View {
 }
 
 private struct UsageCenterSummary {
+    struct ToolUsageItem: Identifiable {
+        var id: String { name }
+        let name: String
+        let count: Int
+        let percentage: Int
+    }
+
     let todayTokens: Int
     let weekTokens: Int
     let monthTokens: Int
@@ -260,6 +267,9 @@ private struct UsageCenterSummary {
     let averageDailyCost: Decimal?
     let projectedMonthTokens: Int
     let projectedMonthCost: Decimal?
+    let todayActiveSeconds: TimeInterval
+    let toolUsageItems: [ToolUsageItem]
+    let totalToolCalls: Int
 
     init(usage: UsageSnapshot?, calendar: Calendar = Calendar(identifier: .gregorian), now: Date = Date()) {
         let daily = usage?.dailyTokenUsage ?? []
@@ -283,6 +293,10 @@ private struct UsageCenterSummary {
         averageDailyCost = monthCost.map { $0 / Decimal(max(dayOfMonth, 1)) }
         projectedMonthTokens = averageDailyTokens * daysInMonth
         projectedMonthCost = averageDailyCost.map { $0 * Decimal(daysInMonth) }
+        todayActiveSeconds = usage?.todayActiveSeconds ?? 0
+        let toolStats = usage?.toolStats ?? ToolStats()
+        totalToolCalls = toolStats.total
+        toolUsageItems = Self.toolUsageItems(from: toolStats)
     }
 
     private static func days(count: Int, endingAt endDate: Date, calendar: Calendar, dayMap: [String: UsageSnapshot.DailyTokenUsage]) -> [UsageSnapshot.DailyTokenUsage] {
@@ -316,6 +330,29 @@ private struct UsageCenterSummary {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
     }
+
+    private static func toolUsageItems(from stats: ToolStats) -> [ToolUsageItem] {
+        let total = stats.total
+        guard total > 0 else { return [] }
+        return [
+            ("Bash", stats.terminalCommands),
+            ("Edit", stats.fileChanges),
+            ("Write", stats.writeStdin),
+            ("Other", stats.other)
+        ]
+        .filter { $0.1 > 0 }
+        .sorted {
+            if $0.1 == $1.1 { return $0.0 < $1.0 }
+            return $0.1 > $1.1
+        }
+        .map { name, count in
+            ToolUsageItem(
+                name: name,
+                count: count,
+                percentage: Int((Double(count) / Double(total) * 100).rounded())
+            )
+        }
+    }
 }
 
 private struct UsageForecastCard: View {
@@ -326,13 +363,13 @@ private struct UsageForecastCard: View {
     private var usage: UsageCenterSummary { UsageCenterSummary(usage: codex?.usage) }
 
     var body: some View {
-        GlassPanel(title: "Usage Center") {
+        GlassPanel(title: AppStrings.Sections.usageCenter) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
                 compactMetric("本月累计消耗", AgentPulseFormatters.money(usage.monthCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
                 compactMetric("预计本月消耗", AgentPulseFormatters.money(usage.projectedMonthCost, privacy: store.settings.privacyMode), AgentPulseColors.thinking)
                 compactMetric("预计剩余额度", remainingQuotaText, quotaTint)
                 compactMetric("平均每日 Token", AgentPulseFormatters.tokens(usage.averageDailyTokens), AgentPulseColors.token)
-                compactMetric("平均每日 Cost", AgentPulseFormatters.money(usage.averageDailyCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
+                compactMetric(AppStrings.Metrics.averageDailyCost, AgentPulseFormatters.money(usage.averageDailyCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
             }
             Text("全部基于本地 Codex 会话日志聚合；不接入第三方服务。")
                 .font(.caption)
@@ -389,14 +426,74 @@ private struct UsagePage: View {
 	                tint: usageHealthTint
 	            )
 	            LazyVGrid(columns: metricColumns, spacing: 12) {
-	                MetricTile(title: "Today Tokens", value: AgentPulseFormatters.tokens(usageCenter.todayTokens), tint: AgentPulseColors.token)
-	                MetricTile(title: "Week Tokens", value: AgentPulseFormatters.tokens(usageCenter.weekTokens), tint: AgentPulseColors.thinking)
-	                MetricTile(title: "Month Tokens", value: AgentPulseFormatters.tokens(usageCenter.monthTokens), tint: AgentPulseColors.working)
-	                MetricTile(title: "Today Cost", value: AgentPulseFormatters.money(usageCenter.todayCost, privacy: store.settings.privacyMode), tint: AgentPulseColors.working)
-	                MetricTile(title: "Week Cost", value: AgentPulseFormatters.money(usageCenter.weekCost, privacy: store.settings.privacyMode), tint: AgentPulseColors.token)
-	                MetricTile(title: "Month Cost", value: AgentPulseFormatters.money(usageCenter.monthCost, privacy: store.settings.privacyMode), tint: AgentPulseColors.thinking)
-	            }
-	            GlassPanel(title: "数据来源") {
+                MetricTile(title: AppStrings.Metrics.todayActiveTime, value: AgentPulseFormatters.duration(usageCenter.todayActiveSeconds), tint: AgentPulseColors.working)
+                MetricTile(title: AppStrings.Metrics.todayTokens, value: AgentPulseFormatters.tokens(usageCenter.todayTokens), tint: AgentPulseColors.token)
+                MetricTile(title: AppStrings.Metrics.todayCost, value: AgentPulseFormatters.money(usageCenter.todayCost, privacy: store.settings.privacyMode), tint: AgentPulseColors.working)
+            }
+            GlassPanel(title: "额度") {
+                HStack {
+                    Text("Codex WHAM")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                    Spacer()
+                    Button(store.isRefreshingCodexQuota ? "刷新中…" : "刷新额度") { store.refreshCodexQuotaNow() }
+                        .disabled(store.isRefreshingCodexQuota)
+                }
+                QuotaLine(title: "5 小时额度", value: codex?.usage.quota5hRemainingPercent, detail: quotaResetDetail(codex?.usage.quota5hResetAt, windowSeconds: codex?.usage.quota5hWindowSeconds))
+                QuotaLine(title: "本周额度", value: codex?.usage.quotaWeekRemainingPercent, detail: quotaResetDetail(codex?.usage.quotaWeekResetAt, windowSeconds: codex?.usage.quotaWeekWindowSeconds, includesDate: true))
+                if let quotaErrorDetail {
+                    StatusNote(text: quotaErrorDetail, tone: .warning)
+                }
+                if let lowQuotaDetail {
+                    StatusNote(text: lowQuotaDetail, tone: .warning)
+                }
+                Text("优先显示 Codex WHAM 实时额度；接口不可用时，使用本地会话 token 给出临时参考。")
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+            }
+            GlassPanel(title: AppStrings.Sections.tokenBreakdown) {
+                if tokenBreakdownTotal == 0 {
+                    EmptyState(text: "暂未解析到 input / cached / output 明细。")
+                } else {
+                    TokenBreakdownRow(title: "输入", value: codex?.usage.inputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.thinking)
+                    TokenBreakdownRow(title: "缓存输入", value: codex?.usage.cachedInputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.token)
+                    TokenBreakdownRow(title: "输出", value: codex?.usage.outputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.working)
+                }
+            }
+            GlassPanel(title: "Model Usage") {
+                if modelValues.isEmpty {
+                    EmptyState(text: "暂无模型使用数据")
+                } else {
+                    ForEach(modelValues) { item in
+                        ModelUsageRow(item: item, total: totalModelTokens, privacy: store.settings.privacyMode)
+                    }
+                }
+            }
+            GlassPanel(title: "工具调用") {
+                Text("总调用次数：\(usageCenter.totalToolCalls)")
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                if usageCenter.toolUsageItems.isEmpty {
+                    EmptyState(text: "暂无工具调用数据")
+                } else {
+                    ForEach(usageCenter.toolUsageItems) { item in
+                        ToolUsageRow(item: item)
+                    }
+                }
+            }
+            GlassPanel(title: AppStrings.Sections.agentJournal) {
+                if journalEntries.isEmpty {
+                    EmptyState(text: "今天还没有可展示的 Codex 工作段。")
+                } else {
+                    ForEach(journalEntries) { entry in
+                        JournalEntryRow(entry: entry, todayTokens: usageCenter.todayTokens, privacy: store.settings.privacyMode)
+                        if entry.id != journalEntries.last?.id {
+                            Divider().opacity(0.35)
+                        }
+                    }
+                }
+            }
+            GlassPanel(title: "数据来源") {
                 HStack {
                     Text("本地扫描")
                         .font(.system(size: 13, weight: .medium))
@@ -408,95 +505,56 @@ private struct UsagePage: View {
                 SourceRow(title: "Token", value: codex?.usage.tokenDataSource ?? "~/.codex/sessions JSONL", detail: scannedFileDetail)
                 SourceRow(title: "额度", value: codex?.usage.quotaDataSource ?? "等待首次刷新", detail: quotaUpdateDetail)
             }
-            GlassPanel(title: "额度") {
-                HStack {
-                    Text("Codex WHAM")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                    Spacer()
-                    Button(store.isRefreshingCodexQuota ? "刷新中…" : "刷新额度") { store.refreshCodexQuotaNow() }
-                        .disabled(store.isRefreshingCodexQuota)
-                }
-                QuotaLine(title: "5 小时额度", value: codex?.usage.quota5hRemainingPercent ?? 0, detail: quotaResetDetail(codex?.usage.quota5hResetAt, windowSeconds: codex?.usage.quota5hWindowSeconds))
-                QuotaLine(title: "本周额度", value: codex?.usage.quotaWeekRemainingPercent ?? 0, detail: quotaResetDetail(codex?.usage.quotaWeekResetAt, windowSeconds: codex?.usage.quotaWeekWindowSeconds, includesDate: true))
-                if let quotaErrorDetail {
-                    StatusNote(text: quotaErrorDetail, tone: .warning)
-                }
-                if let lowQuotaDetail {
-                    StatusNote(text: lowQuotaDetail, tone: .warning)
-                }
-                Text("优先显示 Codex WHAM 实时额度；接口不可用时，使用本地会话 token 给出临时参考。")
-                    .font(.caption)
-                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-            }
-	            GlassPanel(title: "最近 7 天趋势") {
-	                if usageCenter.last7Days.allSatisfy({ $0.tokens == 0 }) {
-	                    EmptyState(text: "最近 7 天暂无 token 数据。")
-	                } else {
-	                    UsageBarChart(values: usageCenter.last7Days.map(\.tokens), labels: usageCenter.last7Days.map(\.date), tint: AgentPulseColors.working)
-	                    HStack {
-	                        Text(usageCenter.last7Days.first?.date ?? "")
-	                        Spacer()
-	                        Text("按日 token 使用量")
-	                        Spacer()
-	                        Text(usageCenter.last7Days.last?.date ?? "")
-	                    }
-	                    .font(.caption)
-	                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-	                }
-	            }
-	            GlassPanel(title: "最近 30 天趋势") {
-	                if usageCenter.last30Days.allSatisfy({ $0.tokens == 0 }) {
-	                    EmptyState(text: "暂无每日 token 数据。运行产生 usage 字段的 Codex 会话后，这里才会绘制柱状图。")
-	                } else {
-	                    UsageBarChart(values: usageCenter.last30Days.map(\.tokens), labels: usageCenter.last30Days.map(\.date), tint: AgentPulseColors.token)
-	                    HStack {
-	                        Text(usageCenter.last30Days.first?.date ?? "")
-	                        Spacer()
-	                        Text("按日 token 使用量")
-	                        Spacer()
-	                        Text(usageCenter.last30Days.last?.date ?? "")
-	                    }
-                    .font(.caption)
-                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                }
-            }
-            GlassPanel(title: "Token 结构") {
-                if tokenBreakdownTotal == 0 {
-                    EmptyState(text: "暂未解析到 input / cached / output 明细。")
+            GlassPanel(title: "最近 7 天趋势") {
+                if usageCenter.last7Days.allSatisfy({ $0.tokens == 0 }) {
+                    EmptyState(text: "最近 7 天暂无 token 数据。")
                 } else {
-                    TokenBreakdownRow(title: "Input", value: codex?.usage.inputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.thinking)
-                    TokenBreakdownRow(title: "Cached", value: codex?.usage.cachedInputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.token)
-                    TokenBreakdownRow(title: "Output", value: codex?.usage.outputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.working)
-                }
-            }
-            GlassPanel(title: "模型明细") {
-                if modelValues.isEmpty {
-                    EmptyState(text: "暂未解析到模型字段。新的 Codex 会话刷新后，这里会显示各模型 token 占比。")
-                } else {
-                    ForEach(modelValues) { item in
-                        ModelUsageRow(item: item, total: totalModelTokens, privacy: store.settings.privacyMode)
+                    UsageBarChart(values: usageCenter.last7Days.map(\.tokens), labels: usageCenter.last7Days.map(\.date), tint: AgentPulseColors.working)
+                    HStack {
+                        Text(usageCenter.last7Days.first?.date ?? "")
+                        Spacer()
+                        Text("按日 token 使用量")
+                        Spacer()
+                        Text(usageCenter.last7Days.last?.date ?? "")
                     }
-                }
-            }
-            GlassPanel(title: "工具调用") {
-                Text(toolStatsDetail)
                     .font(.caption)
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                ToolRow("终端命令", codex?.toolStats.terminalCommands ?? 0)
-                ToolRow("修改文件", codex?.toolStats.fileChanges ?? 0)
-                ToolRow("write_stdin", codex?.toolStats.writeStdin ?? 0)
-                ToolRow("其他", codex?.toolStats.other ?? 0)
+                }
+            }
+            GlassPanel(title: "最近 30 天趋势") {
+                if usageCenter.last30Days.allSatisfy({ $0.tokens == 0 }) {
+                    EmptyState(text: "暂无每日 token 数据。运行产生 usage 字段的 Codex 会话后，这里才会绘制柱状图。")
+                } else {
+                    UsageBarChart(values: usageCenter.last30Days.map(\.tokens), labels: usageCenter.last30Days.map(\.date), tint: AgentPulseColors.token)
+                    HStack {
+                        Text(usageCenter.last30Days.first?.date ?? "")
+                        Spacer()
+                        Text("按日 token 使用量")
+                        Spacer()
+                        Text(usageCenter.last30Days.last?.date ?? "")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                }
             }
         }
     }
 
     private var modelValues: [UsageSnapshot.ModelTokenUsage] {
-        codex?.usage.modelTokenUsage.prefix(6).map { $0 } ?? []
+        (codex?.usage.modelTokenUsage ?? [])
+            .filter { $0.tokens > 0 }
+            .sorted {
+                if $0.tokens == $1.tokens { return $0.model < $1.model }
+                return $0.tokens > $1.tokens
+            }
+    }
+
+    private var journalEntries: [UsageSnapshot.JournalEntry] {
+        codex?.usage.journalEntries ?? []
     }
 
     private var totalModelTokens: Int {
-        max(codex?.usage.modelTokenUsage.reduce(0) { $0 + $1.tokens } ?? 0, 1)
+        max(modelValues.reduce(0) { $0 + $1.tokens }, 1)
     }
 
     private var tokenBreakdownTotal: Int {
@@ -532,12 +590,6 @@ private struct UsagePage: View {
         return Date().timeIntervalSince(latest) < 900 ? AgentPulseColors.working : AgentPulseColors.token
     }
 
-    private func quotaMetricTint(_ value: Int) -> Color {
-        if value <= 20 { return AgentPulseColors.attention }
-        if value <= 50 { return AgentPulseColors.thinking }
-        return AgentPulseColors.working
-    }
-
     private var scannedFileDetail: String {
         let count = codex?.usage.scannedFileCount ?? 0
         let scanText = codex?.usage.usageScannedAt.map { " · 更新于 \($0.formatted(date: .omitted, time: .standard))" } ?? ""
@@ -552,17 +604,6 @@ private struct UsagePage: View {
             return " · 最新 \(file) \(date.formatted(date: .omitted, time: .shortened))"
         }
         return " · 最新 \(file)"
-    }
-
-    private var toolStatsDetail: String {
-        guard let path = codex?.usage.latestSessionPath else {
-            return "来自最新 Codex session。"
-        }
-        let file = URL(fileURLWithPath: path).lastPathComponent
-        if let date = codex?.usage.latestSessionModifiedAt {
-            return "来自最新 session：\(file) · \(date.formatted(date: .omitted, time: .shortened))"
-        }
-        return "来自最新 session：\(file)"
     }
 
     private var quotaUpdateDetail: String {
@@ -882,14 +923,14 @@ private struct AboutPage: View {
                 .foregroundStyle(AgentPulseColors.token)
             Text("AgentPulse")
                 .font(.largeTitle.weight(.bold))
-            Text("版本 1.0.0 · Codex usage center")
+            Text("版本 1.0.1 · Codex 用量中心")
                 .foregroundStyle(settings.secondaryText(system: colorScheme))
             HStack {
                 Button("打开配置目录") {
                     NSWorkspace.shared.open(AppStoragePaths().root)
                 }
                 Button("复制版本信息") {
-                    copy("AgentPulse 1.0.0\nConfig: \(AppStoragePaths().root.path)")
+                    copy("AgentPulse 1.0.1\nConfig: \(AppStoragePaths().root.path)")
                 }
             }
             Spacer()
@@ -1100,6 +1141,75 @@ private struct MetricTile: View {
     }
 }
 
+private struct JournalEntryRow: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let entry: UsageSnapshot.JournalEntry
+    let todayTokens: Int
+    let privacy: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(AgentPulseColors.working.opacity(0.75))
+                    .frame(width: 4, height: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(time(entry.startedAt)) - \(time(entry.endedAt))")
+                        .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    Text(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)
+                        .font(.system(size: 11))
+                        .foregroundStyle(settings.tertiaryText(system: colorScheme))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Text(AgentPulseFormatters.duration(entry.durationSeconds))
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(settings.primaryText(system: colorScheme))
+            }
+            HStack(spacing: 8) {
+                journalMetric("Token", AgentPulseFormatters.tokens(entry.tokens), tint: AgentPulseColors.token)
+                journalMetric("占今日", tokenShareText, tint: AgentPulseColors.working)
+                journalMetric("Cost", AgentPulseFormatters.money(entry.cost, privacy: privacy), tint: AgentPulseColors.thinking)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func journalMetric(_ title: String, _ value: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(tint.opacity(0.8))
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+            Text(value)
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(settings.primaryText(system: colorScheme))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(settings.isDarkMode(system: colorScheme) ? Color.white.opacity(0.045) : Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func time(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
+    }
+
+    private var tokenShareText: String {
+        guard todayTokens > 0 else { return "--" }
+        let percent = Double(entry.tokens) / Double(todayTokens) * 100
+        if percent > 0, percent < 0.1 {
+            return "<0.1%"
+        }
+        return String(format: "%.0f%%", percent.rounded())
+    }
+}
+
 private struct UsageHealthCard: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
@@ -1280,7 +1390,7 @@ private struct QuotaLine: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
     let title: String
-    let value: Int
+    let value: Int?
     var detail: String? = nil
 
     var body: some View {
@@ -1290,7 +1400,7 @@ private struct QuotaLine: View {
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 76, alignment: .leading)
                 Spacer()
-                Text("\(value)%")
+                Text(valueText)
                     .font(.system(size: 15, weight: .semibold).monospacedDigit())
                     .foregroundStyle(accent)
                     .frame(width: 42, alignment: .trailing)
@@ -1311,6 +1421,10 @@ private struct QuotaLine: View {
                 }
             }
             .frame(height: 8)
+            Text(quotaBalanceText)
+                .font(.caption)
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+                .lineLimit(1)
             if let detail {
                 Text(detail)
                     .font(.caption)
@@ -1322,12 +1436,26 @@ private struct QuotaLine: View {
     }
 
     private var accent: Color {
+        guard let value else { return settings.secondaryText(system: colorScheme) }
         if value <= 20 { return AgentPulseColors.attention }
         if value <= 50 { return AgentPulseColors.thinking }
         return AgentPulseColors.working
     }
 
+    private var valueText: String {
+        value.map { "\($0)%" } ?? "--"
+    }
+
+    private var quotaBalanceText: String {
+        guard let value else {
+            return "已使用 -- · 剩余 --"
+        }
+        let remaining = min(max(value, 0), 100)
+        return "已使用 \(100 - remaining)% · 剩余 \(remaining)%"
+    }
+
     private func barWidth(totalWidth: CGFloat) -> CGFloat {
+        guard let value else { return 0 }
         guard value > 0 else { return 0 }
         return max(8, totalWidth * CGFloat(min(max(value, 0), 100)) / 100)
     }
@@ -1445,8 +1573,17 @@ private struct ModelUsageRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Text("\(percent)%")
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                Text(AgentPulseFormatters.money(item.cost, privacy: privacy))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(settings.secondaryText(system: colorScheme))
+            }
+            HStack(alignment: .firstTextBaseline) {
+                Text(AgentPulseFormatters.tokens(item.tokens))
+                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(settings.primaryText(system: colorScheme))
+                Spacer()
+                Text(percentText)
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(AgentPulseColors.token)
             }
             GeometryReader { geometry in
@@ -1461,18 +1598,11 @@ private struct ModelUsageRow: View {
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: max(8, geometry.size.width * CGFloat(percent) / 100))
+                        .frame(width: max(8, geometry.size.width * CGFloat(clampedPercentValue) / 100))
                 }
             }
             .frame(height: 7)
-            HStack {
-                Text(AgentPulseFormatters.tokens(item.tokens))
-                Spacer()
-                Text(AgentPulseFormatters.money(item.cost, privacy: privacy))
-            }
-            .font(.caption)
-            .foregroundStyle(settings.secondaryText(system: colorScheme))
-            Text("Input \(AgentPulseFormatters.tokens(item.inputTokens)) · Cached \(AgentPulseFormatters.tokens(item.cachedInputTokens)) · Output \(AgentPulseFormatters.tokens(item.outputTokens))")
+            Text("输入 \(AgentPulseFormatters.tokens(item.inputTokens)) · 缓存输入 \(AgentPulseFormatters.tokens(item.cachedInputTokens)) · 输出 \(AgentPulseFormatters.tokens(item.outputTokens))")
                 .font(.caption2)
                 .foregroundStyle(settings.tertiaryText(system: colorScheme))
                 .lineLimit(1)
@@ -1480,8 +1610,19 @@ private struct ModelUsageRow: View {
         .padding(.vertical, 4)
     }
 
-    private var percent: Int {
-        Int((Double(item.tokens) / Double(max(total, 1)) * 100).rounded())
+    private var percentValue: Double {
+        Double(item.tokens) / Double(max(total, 1)) * 100
+    }
+
+    private var clampedPercentValue: Double {
+        min(max(percentValue, 0), 100)
+    }
+
+    private var percentText: String {
+        if percentValue > 0, percentValue < 0.1 {
+            return "<0.1%"
+        }
+        return String(format: "%.1f%%", percentValue)
     }
 }
 
@@ -1499,7 +1640,7 @@ private struct TokenBreakdownRow: View {
                 Text(title)
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
-                Text("\(AgentPulseFormatters.tokens(value)) · \(percent)%")
+                Text("\(AgentPulseFormatters.tokens(value)) · \(percentText)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
             }
@@ -1508,7 +1649,7 @@ private struct TokenBreakdownRow: View {
                     Capsule().fill(settings.dividerColor(system: colorScheme))
                     Capsule()
                         .fill(tint.opacity(0.8))
-                        .frame(width: max(value == 0 ? 0 : 7, geometry.size.width * CGFloat(percent) / 100))
+                        .frame(width: max(value == 0 ? 0 : 7, geometry.size.width * CGFloat(clampedPercentValue) / 100))
                 }
             }
             .frame(height: 7)
@@ -1517,26 +1658,50 @@ private struct TokenBreakdownRow: View {
     }
 
     private var percent: Int {
+        Int(percentValue.rounded())
+    }
+
+    private var percentValue: Double {
         guard total > 0 else { return 0 }
-        return Int((Double(value) / Double(total) * 100).rounded())
+        return Double(value) / Double(total) * 100
+    }
+
+    private var clampedPercentValue: Double {
+        min(max(percentValue, 0), 100)
+    }
+
+    private var percentText: String {
+        guard total > 0 else { return "0%" }
+        if value > 0, percentValue < 0.1 {
+            return "<0.1%"
+        }
+        if percentValue < 10, percentValue.rounded() != percentValue {
+            return String(format: "%.1f%%", percentValue)
+        }
+        return "\(percent)%"
     }
 }
 
-private struct ToolRow: View {
-    let title: String
-    let count: Int
-
-    init(_ title: String, _ count: Int) {
-        self.title = title
-        self.count = count
-    }
+private struct ToolUsageRow: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let item: UsageCenterSummary.ToolUsageItem
 
     var body: some View {
         HStack {
-            Text(title)
+            Text(item.name)
+                .font(.system(size: 13, weight: .medium))
             Spacer()
-            Text("\(count)").monospacedDigit()
+            Text("\(item.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+                .frame(width: 48, alignment: .trailing)
+            Text("\(item.percentage)%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(AgentPulseColors.token)
+                .frame(width: 42, alignment: .trailing)
         }
+        .padding(.vertical, 3)
     }
 }
 
