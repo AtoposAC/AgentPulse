@@ -66,6 +66,12 @@ public enum CodexLogParser {
             if shouldCountTool(payloadType: payloadType, name: name) {
                 if name.contains("write_stdin") {
                     toolStats.writeStdin += 1
+                } else if name.contains("web") || name.contains("browser") {
+                    toolStats.webRequests += 1
+                } else if name.contains("search") || name.contains("grep") || name == "rg" || name.contains("ripgrep") {
+                    toolStats.searchOperations += 1
+                } else if name.contains("read") || name.contains("open") || name.contains("view") || name.contains("cat") {
+                    toolStats.readOperations += 1
                 } else if name.contains("exec") || name.contains("bash") || name.contains("shell") || name.contains("terminal") || name.contains("command") {
                     toolStats.terminalCommands += 1
                 } else if name.contains("edit") || name.contains("write") || name.contains("patch") {
@@ -141,9 +147,18 @@ public enum CodexLogParser {
             || name.contains("terminal")
             || name.contains("command")
             || name.contains("write_stdin")
+            || name.contains("read")
+            || name.contains("open")
+            || name.contains("view")
+            || name.contains("cat")
             || name.contains("edit")
             || name.contains("write")
             || name.contains("patch")
+            || name.contains("search")
+            || name.contains("grep")
+            || name.contains("ripgrep")
+            || name.contains("web")
+            || name.contains("browser")
         )
     }
 

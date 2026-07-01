@@ -14,11 +14,7 @@ let package = Package(
     targets: [
         .target(
             name: "AgentPulseCore",
-            path: "Sources/AgentPulseCore",
-            exclude: [
-                "HookManager.swift",
-                "ClaudeHookWatcher.swift"
-            ]
+            path: "Sources/AgentPulseCore"
         ),
         .target(
             name: "AgentPulseUI",

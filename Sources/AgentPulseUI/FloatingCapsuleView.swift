@@ -11,10 +11,9 @@ public struct FloatingCapsuleStackView: View {
     }
 
     public var body: some View {
+        let agents = sortedAgents
         VStack(spacing: 8) {
-            ForEach(store.visibleAgents) { agent in
-                FloatingCapsuleView(agent: agent, settings: store.settings, expanded: expanded)
-            }
+            FloatingCapsuleView(agent: agents.first ?? AgentSnapshot(kind: .codex), agents: agents, settings: store.settings, expanded: expanded)
         }
         .contentShape(Rectangle())
         .onHover { inside in
@@ -33,16 +32,27 @@ public struct FloatingCapsuleStackView: View {
         }
         .preferredColorScheme(store.settings.preferredColorScheme)
     }
+
+    private var sortedAgents: [AgentSnapshot] {
+        store.visibleAgents.sorted {
+            if $0.signal.priority == $1.signal.priority {
+                return $0.kind.displayName < $1.kind.displayName
+            }
+            return $0.signal.priority > $1.signal.priority
+        }
+    }
 }
 
 public struct FloatingCapsuleView: View {
     @Environment(\.colorScheme) private var colorScheme
     let agent: AgentSnapshot
+    let agents: [AgentSnapshot]
     let settings: AgentPulseSettings
     let expanded: Bool
 
-    public init(agent: AgentSnapshot, settings: AgentPulseSettings, expanded: Bool) {
+    public init(agent: AgentSnapshot, agents: [AgentSnapshot] = [], settings: AgentPulseSettings, expanded: Bool) {
         self.agent = agent
+        self.agents = agents
         self.settings = settings
         self.expanded = expanded
     }
@@ -62,6 +72,7 @@ public struct FloatingCapsuleView: View {
         .background(CapsuleGlassBackground(settings: settings, cornerRadius: expanded ? 20 : 15))
         .foregroundStyle(settings.primaryText(system: colorScheme))
         .fontDesign(.default)
+        .help(capsuleHelpText)
     }
 
     private var header: some View {
@@ -72,51 +83,100 @@ public struct FloatingCapsuleView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
                     .lineLimit(1)
-                Text(AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode))
+                Text(primaryMetricText)
                     .font(.system(size: 14, weight: .bold).monospacedDigit())
                     .lineLimit(1)
-                Text("\(AgentPulseFormatters.tokens(agent.usage.todayTokens)) 今日")
+                Text(secondaryMetricText)
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(AgentPulseColors.token)
                     .lineLimit(1)
             }
             Spacer(minLength: expanded ? 6 : 2)
-            quotaBadge(agent.usage.quota5hRemainingPercent)
+            if agent.kind == .codex {
+                quotaBadge(agent.usage.quota5hRemainingPercent)
+            }
         }
+    }
+
+    private var primaryMetricText: String {
+        agent.kind == .codex ? AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode) : "状态监测"
+    }
+
+    private var secondaryMetricText: String {
+        agent.kind == .codex ? "\(AgentPulseFormatters.tokens(agent.usage.todayTokens)) 今日" : "Token 暂未提供"
     }
 
     private var expandedBody: some View {
         VStack(alignment: .leading, spacing: 9) {
+            if agents.count > 1 {
+                DividerLine(settings: settings)
+                Text("Agent 状态")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(settings.primaryText(system: colorScheme).opacity(0.68))
+                ForEach(agents) { item in
+                    agentStatusRow(item)
+                }
+            }
             DividerLine(settings: settings)
-            metricRow("费用", AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode), title: "今日用量")
-            metricRow("Token", AgentPulseFormatters.tokens(agent.usage.todayTokens))
-            DividerLine(settings: settings)
-            quotaRow("5小时", value: agent.usage.quota5hRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quota5hResetAt, includesDate: false))
-            quotaRow("本周", value: agent.usage.quotaWeekRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quotaWeekResetAt, includesDate: true))
-            if let lowQuotaText {
-                Text(lowQuotaText)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(AgentPulseColors.attention)
-                    .lineLimit(1)
+            if agent.kind == .codex {
+                metricRow("费用", AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode), title: "今日用量")
+                metricRow("Token", AgentPulseFormatters.tokens(agent.usage.todayTokens))
+                DividerLine(settings: settings)
+                quotaRow("5小时", value: agent.usage.quota5hRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quota5hResetAt, includesDate: false))
+                quotaRow("本周", value: agent.usage.quotaWeekRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quotaWeekResetAt, includesDate: true))
+                if let lowQuotaText {
+                    Text(lowQuotaText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(AgentPulseColors.attention)
+                        .lineLimit(1)
+                }
+            } else {
+                metricRow("Token", "暂未提供", title: "Claude Usage")
+                metricRow("Cost", "暂未提供")
             }
             DividerLine(settings: settings)
             Text("工具调用 · \(agent.toolStats.total) 次")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(settings.primaryText(system: colorScheme).opacity(0.68))
             metricRow("终端命令", "\(agent.toolStats.terminalCommands)")
+            if agent.toolStats.readOperations > 0 {
+                metricRow("读取文件", "\(agent.toolStats.readOperations)")
+            }
             metricRow("修改文件", "\(agent.toolStats.fileChanges)")
             metricRow("write_stdin", "\(agent.toolStats.writeStdin)")
+            if agent.toolStats.searchOperations > 0 {
+                metricRow("搜索", "\(agent.toolStats.searchOperations)")
+            }
+            if agent.toolStats.webRequests > 0 {
+                metricRow("网页", "\(agent.toolStats.webRequests)")
+            }
             metricRow("其他", "\(agent.toolStats.other)")
-            DividerLine(settings: settings)
-            metricRow("近30天费用", AgentPulseFormatters.money(agent.usage.thirtyDayCost, privacy: settings.privacyMode))
-            metricRow("近30天 Token", AgentPulseFormatters.tokens(agent.usage.thirtyDayTokens))
-            Button("打开 Codex") {
+            if agent.kind == .codex {
+                DividerLine(settings: settings)
+                metricRow("近30天费用", AgentPulseFormatters.money(agent.usage.thirtyDayCost, privacy: settings.privacyMode))
+                metricRow("近30天 Token", AgentPulseFormatters.tokens(agent.usage.thirtyDayTokens))
+            }
+            Button(agent.kind == .codex ? "打开 Codex" : "打开 Claude") {
                 openAgent()
             }
             .buttonStyle(.borderedProminent)
             .tint(settings.primaryText(system: colorScheme).opacity(0.14))
         }
         .padding(.top, 9)
+    }
+
+    private func agentStatusRow(_ item: AgentSnapshot) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(item.signal.pulseColor.opacity(0.85))
+                .frame(width: 7, height: 7)
+            Text(item.kind.displayName)
+                .font(.system(size: 11, weight: .medium))
+            Spacer()
+            Text(item.signal.title)
+                .font(.system(size: 11))
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+        }
     }
 
     private func metricRow(_ label: String, _ value: String, title: String? = nil) -> some View {
@@ -189,9 +249,9 @@ public struct FloatingCapsuleView: View {
     }
 
     private func quotaBadge(_ value: Int?) -> some View {
-        let percent = value ?? 0
-        let accent = quotaAccent(percent)
-        return Text("\(percent)%")
+        let percent = value
+        let accent = percent.map(quotaAccent) ?? settings.secondaryText(system: colorScheme)
+        return Text(percent.map { "\($0)%" } ?? "--")
             .font(.system(size: 10, weight: .semibold).monospacedDigit())
             .foregroundStyle(accent)
             .frame(minWidth: 34)
@@ -202,8 +262,8 @@ public struct FloatingCapsuleView: View {
             .help(quotaBadgeHelp(percent: percent))
     }
 
-    private func quotaBadgeHelp(percent: Int) -> String {
-        var text = "5 小时额度剩余 \(percent)%"
+    private func quotaBadgeHelp(percent: Int?) -> String {
+        var text = percent.map { "5 小时额度剩余 \($0)%" } ?? "5 小时额度剩余未知"
         if let reset = quotaResetText(agent.usage.quota5hResetAt, includesDate: false) {
             text += " · \(reset)"
         }
@@ -211,6 +271,49 @@ public struct FloatingCapsuleView: View {
             text += " · \(source)"
         }
         return text
+    }
+
+    private var capsuleHelpText: String {
+        [
+            currentModelText,
+            "当前状态：\(agent.signal.title)",
+            "今日活跃：\(AgentPulseFormatters.duration(displayActiveSeconds))",
+            toolActivityText
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
+    }
+
+    private var displayActiveSeconds: TimeInterval {
+        let today = dayKey(Date())
+        let journalSeconds = agent.usage.journalEntries
+            .filter { dayKey($0.startedAt) == today }
+            .reduce(0) { $0 + $1.durationSeconds }
+        return max(agent.usage.todayActiveSeconds, journalSeconds)
+    }
+
+    private func dayKey(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private var currentModelText: String? {
+        guard let model = agent.usage.modelTokenUsage
+            .filter({ $0.tokens > 0 })
+            .sorted(by: {
+                if $0.tokens == $1.tokens { return $0.model < $1.model }
+                return $0.tokens > $1.tokens
+            })
+            .first?.model
+        else { return nil }
+        return "当前模型：\(model)"
+    }
+
+    private var toolActivityText: String? {
+        guard agent.toolStats.total > 0 else { return nil }
+        return "工具调用：今日 \(agent.toolStats.total) 次"
     }
 
     private var lowQuotaText: String? {

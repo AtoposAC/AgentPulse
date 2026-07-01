@@ -16,14 +16,18 @@ public enum CodexUsageScanner {
         var dailyCosts: [String: Decimal] = [:]
         var firstEventAt: Date?
         var lastEventAt: Date?
+        var journalSegments: [JournalSegment] = []
 
-        mutating func add(_ breakdown: TokenBreakdown, cost: Decimal?, model: String? = nil, day: String? = nil) {
+        mutating func add(_ breakdown: TokenBreakdown, cost: Decimal?, model: String? = nil, day: String? = nil, eventDate: Date? = nil) {
             self.tokens += breakdown.total
             inputTokens += breakdown.input
             cachedInputTokens += breakdown.cached
             outputTokens += breakdown.output
             if let cost {
                 self.cost = (self.cost ?? 0) + cost
+            }
+            if let eventDate, breakdown.total > 0 {
+                recordJournalUsage(at: eventDate, tokens: breakdown.total, cost: cost)
             }
             if let day, breakdown.total > 0 {
                 dailyTokens[day, default: 0] += breakdown.total
@@ -108,7 +112,6 @@ public enum CodexUsageScanner {
         }
 
         mutating func noteEvent(at date: Date, day: String, fallbackDay: String) {
-            guard day == fallbackDay else { return }
             if firstEventAt == nil || date < firstEventAt! {
                 firstEventAt = date
             }
@@ -125,7 +128,31 @@ public enum CodexUsageScanner {
                 lastEventAt = last
             }
         }
+
+        mutating func recordJournalUsage(at date: Date, tokens: Int, cost: Decimal?) {
+            guard tokens > 0 else { return }
+            if let last = journalSegments.indices.last,
+               date.timeIntervalSince(journalSegments[last].endedAt) <= journalMergeWindowSeconds {
+                journalSegments[last].endedAt = max(journalSegments[last].endedAt, date)
+                journalSegments[last].tokens += tokens
+                if let cost {
+                    journalSegments[last].cost = (journalSegments[last].cost ?? 0) + cost
+                }
+                return
+            }
+            journalSegments.append(JournalSegment(startedAt: date, endedAt: date, tokens: tokens, cost: cost))
+        }
     }
+
+    private struct JournalSegment {
+        var startedAt: Date
+        var endedAt: Date
+        var tokens: Int
+        var cost: Decimal?
+    }
+
+    private static let journalMergeWindowSeconds: TimeInterval = 5 * 60
+    private static let journalHistoryDays = 7
 
     public struct Options: Sendable {
         public var estimateInternalModelCost: Bool
@@ -158,6 +185,8 @@ public enum CodexUsageScanner {
             nextCache.schemaVersion = UsageCache.currentSchemaVersion
         }
         var seenPaths = Set<String>()
+        let today = dayKey(Date())
+        let journalCutoffDay = calendar.date(byAdding: .day, value: -(journalHistoryDays - 1), to: Date()).map(dayKey) ?? today
 
         for offset in 0..<days {
             guard let date = calendar.date(byAdding: .day, value: -offset, to: Date()) else { continue }
@@ -174,9 +203,9 @@ public enum CodexUsageScanner {
                    entry.modifiedAt == metadata.modifiedAt,
                    entry.size == metadata.size,
                    entry.hasCurrentUsageDetails {
-                    if key == dayKey(Date()) {
+                    if key >= journalCutoffDay || entry.dailyTokens.keys.contains(where: { $0 >= journalCutoffDay }) {
                         let fileUsage = usage(in: file, options: options, fallbackDay: key)
-                        appendJournalEntry(from: fileUsage, path: path, into: &journalEntries)
+                        appendJournalEntries(from: fileUsage, path: path, cutoffDay: journalCutoffDay, into: &journalEntries)
                     }
                     if entry.dailyTokens.isEmpty {
                         totals[entry.day, default: FileUsage()].addCachedEntry(entry)
@@ -192,8 +221,8 @@ public enum CodexUsageScanner {
                     continue
                 }
                 let fileUsage = usage(in: file, options: options, fallbackDay: key)
-                if key == dayKey(Date()) {
-                    appendJournalEntry(from: fileUsage, path: path, into: &journalEntries)
+                if key >= journalCutoffDay || fileUsage.dailyTokens.keys.contains(where: { $0 >= journalCutoffDay }) {
+                    appendJournalEntries(from: fileUsage, path: path, cutoffDay: journalCutoffDay, into: &journalEntries)
                 }
                 if fileUsage.dailyTokens.isEmpty {
                     totals[key, default: FileUsage()].merge(fileUsage)
@@ -270,12 +299,29 @@ public enum CodexUsageScanner {
         )
     }
 
-    private static func appendJournalEntry(from fileUsage: FileUsage, path: String, into entries: inout [UsageSnapshot.JournalEntry]) {
+    private static func appendJournalEntries(from fileUsage: FileUsage, path: String, cutoffDay: String, into entries: inout [UsageSnapshot.JournalEntry]) {
+        if !fileUsage.journalSegments.isEmpty {
+            for (index, segment) in fileUsage.journalSegments.enumerated() where segment.tokens > 0 {
+                guard dayKey(segment.startedAt) >= cutoffDay else { continue }
+                entries.append(
+                    UsageSnapshot.JournalEntry(
+                        id: "\(path)#\(index)",
+                        startedAt: segment.startedAt,
+                        endedAt: segment.endedAt,
+                        tokens: segment.tokens,
+                        cost: segment.cost,
+                        sourcePath: path
+                    )
+                )
+            }
+            return
+        }
         guard fileUsage.tokens > 0,
               let startedAt = fileUsage.firstEventAt,
               let endedAt = fileUsage.lastEventAt else {
             return
         }
+        guard dayKey(startedAt) >= cutoffDay else { return }
         entries.append(
             UsageSnapshot.JournalEntry(
                 id: path,
@@ -312,7 +358,7 @@ public enum CodexUsageScanner {
                     let lastUsage = info["last_token_usage"] as? [String: Any]
                     let last = tokenBreakdown(lastUsage)
                     if last.total > 0 {
-                        usage.add(last, cost: cost(model: lastModel, usage: last, rawUsage: lastUsage, options: options), model: lastModel, day: eventDay)
+                        usage.add(last, cost: cost(model: lastModel, usage: last, rawUsage: lastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
                     }
                     let total = tokenBreakdown(info["total_token_usage"])
                     maxTotalTokens = max(maxTotalTokens, total.total)
@@ -320,7 +366,7 @@ public enum CodexUsageScanner {
                 let directLastUsage = payload["last_token_usage"] as? [String: Any]
                 let directLast = tokenBreakdown(directLastUsage)
                 if directLast.total > 0 {
-                    usage.add(directLast, cost: cost(model: lastModel, usage: directLast, rawUsage: directLastUsage, options: options), model: lastModel, day: eventDay)
+                    usage.add(directLast, cost: cost(model: lastModel, usage: directLast, rawUsage: directLastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
                 }
                 let directTotal = tokenBreakdown(payload["total_token_usage"])
                 maxTotalTokens = max(maxTotalTokens, directTotal.total)
@@ -328,7 +374,7 @@ public enum CodexUsageScanner {
                 let usageField = tokenBreakdown(directUsage)
                 if usageField.total > 0 {
                     lastModel = directUsage.flatMap { modelName(in: $0) } ?? lastModel
-                    usage.add(usageField, cost: cost(model: lastModel, usage: usageField, rawUsage: directUsage, options: options), model: lastModel, day: eventDay)
+                    usage.add(usageField, cost: cost(model: lastModel, usage: usageField, rawUsage: directUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
                 }
             }
         }
@@ -337,6 +383,9 @@ public enum CodexUsageScanner {
             usage.dailyTokens[fallbackDay, default: 0] += maxTotalTokens
             if let lastModel = normalizedModel(lastModel) {
                 usage.modelTokens[lastModel, default: 0] += maxTotalTokens
+            }
+            if let first = usage.firstEventAt, let last = usage.lastEventAt {
+                usage.journalSegments.append(JournalSegment(startedAt: first, endedAt: last, tokens: maxTotalTokens, cost: nil))
             }
         }
         return usage

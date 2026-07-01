@@ -27,15 +27,6 @@ public enum HookManager {
         # \(marker)
         mkdir -p "$HOME/Library/Application Support/AgentPulse/logs"
         payload="$(cat)"
-        timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
-        bytes="$(printf "%s" "$payload" | wc -c | tr -d ' ')"
-        {
-          printf "===== HOOK TRIGGERED =====\\n"
-          printf "%s\\n" "$timestamp"
-          printf "bytes: %s\\n\\n" "$bytes"
-          printf "payload:\\n"
-          printf "%s\\n\\n" "$payload"
-        } >> "$HOME/Library/Application Support/AgentPulse/logs/claude-hook-debug.log"
         printf "%s\\n" "$payload" >> "$HOME/Library/Application Support/AgentPulse/logs/claude-hook.jsonl"
         exit 0
         """
@@ -56,7 +47,7 @@ public enum HookManager {
             root = existing
         }
 
-        let command = "\(hookScriptURL.path)"
+        let command = shellQuoted(hookScriptURL.path)
         var hooks = root["hooks"] as? [String: Any] ?? [:]
         let events: [(name: String, matcher: String?)] = [
             ("UserPromptSubmit", nil),
@@ -94,6 +85,10 @@ public enum HookManager {
             group["matcher"] = matcher
         }
         return group
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private static func settingsSnippet(events: [String], hooks: [String: Any]) -> String? {

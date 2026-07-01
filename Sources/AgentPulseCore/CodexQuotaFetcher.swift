@@ -115,7 +115,7 @@ public enum CodexQuotaFetcher {
     }
 
     private static func remainingPercent(usedPercent: Double) -> Double {
-        let normalizedUsed = usedPercent <= 1 ? usedPercent * 100 : usedPercent
+        let normalizedUsed = usedPercent < 1 ? usedPercent * 100 : usedPercent
         return max(0, min(100, 100 - max(0, min(100, normalizedUsed)))).rounded()
     }
 
@@ -146,7 +146,7 @@ public enum CodexQuotaFetcher {
     private static func parseWindow(_ window: [String: Any]?) -> ParsedWindow? {
         guard let window else { return nil }
         let remaining = numberValue(in: window, keys: ["remaining_percent", "remainingPercent"]).map { value in
-            Int(max(0, min(100, value <= 1 ? value * 100 : value)).rounded())
+            Int(max(0, min(100, value < 1 ? value * 100 : value)).rounded())
         }
         let used = numberValue(in: window, keys: ["used_percent", "usedPercent", "usage_percent", "usagePercent"])
         let resetAt = dateValue(in: window, keys: ["reset_at", "resetAt", "resets_at", "resetsAt", "end_time", "endTime", "ends_at", "endsAt"])

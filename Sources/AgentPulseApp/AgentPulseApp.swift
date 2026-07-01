@@ -32,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(openSettings), name: .agentPulseOpenSettings, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(showFloatingWindow), name: .agentPulseResetFloatingWindow, object: nil)
         store.start()
+        Task { @MainActor in
+            await Task.yield()
+            store.refreshLaunchDataOnce()
+        }
         lastSignals = Dictionary(uniqueKeysWithValues: store.agents.map { ($0.kind, $0.signal) })
         lastLaunchAtLogin = store.settings.launchAtLogin
         applyPresentationSettings()

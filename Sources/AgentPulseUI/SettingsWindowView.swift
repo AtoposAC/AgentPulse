@@ -205,6 +205,7 @@ private struct DashboardPage: View {
 private struct AgentsPage: View {
     @ObservedObject var store: AgentPulseStore
     @Environment(\.colorScheme) private var colorScheme
+    @State private var message: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -218,18 +219,32 @@ private struct AgentsPage: View {
                     Button("诊断事件") { copyCodexHint() }
                 }
             )
-            GlassPanel(title: "本地脚本") {
-                Text("可通过 CLI 写入本地状态文件，适合临时脚本或自动化任务接入。")
-                    .font(.system(size: 13))
-                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                StatusPill(title: "文件接入", good: true)
-                HStack {
-                    Button("复制状态路径") { copy(store.stateFileURL.path) }
-                    Button("复制示例命令") { copy(".build/debug/agentpulse-cli set local working 正在执行本地任务") }
+            AgentToggleCard(
+                title: "Claude",
+                subtitle: "通过 Claude Code Hooks 监听状态事件；当前仅监测状态，不统计 Token / Cost。",
+                enabled: binding(\.claudeMonitoringEnabled),
+                installed: claudeHookInstalled,
+                actions: {
+                    Button("安装 Hook") { installClaudeHook() }
+                    Button("卸载 Hook") { uninstallClaudeHook() }
+                    Button("打开 Hook 日志") { NSWorkspace.shared.open(store.claudeHookLogURL.deletingLastPathComponent()) }
                 }
+            )
+            Text("Claude Hook 会写入 \(store.claudeHookLogURL.path)")
+                .font(.caption)
+                .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(message.contains("失败") ? store.settings.errorText(system: colorScheme) : store.settings.secondaryText(system: colorScheme))
             }
         }
+    }
+
+    private var claudeHookInstalled: Bool {
+        store.agents.first(where: { $0.kind == .claude })?.hookInstalled ?? HookManager.isClaudeHookInstalled()
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<AgentPulseSettings, Value>) -> Binding<Value> {
@@ -245,112 +260,22 @@ private struct AgentsPage: View {
     private func copyCodexHint() {
         copy("cd /Users/m5/Documents/AgentPulse && .build/debug/agentpulse-cli diagnose-codex")
     }
-}
 
-private struct UsageCenterSummary {
-    struct ToolUsageItem: Identifiable {
-        var id: String { name }
-        let name: String
-        let count: Int
-        let percentage: Int
-    }
-
-    let todayTokens: Int
-    let weekTokens: Int
-    let monthTokens: Int
-    let todayCost: Decimal?
-    let weekCost: Decimal?
-    let monthCost: Decimal?
-    let last7Days: [UsageSnapshot.DailyTokenUsage]
-    let last30Days: [UsageSnapshot.DailyTokenUsage]
-    let averageDailyTokens: Int
-    let averageDailyCost: Decimal?
-    let projectedMonthTokens: Int
-    let projectedMonthCost: Decimal?
-    let todayActiveSeconds: TimeInterval
-    let toolUsageItems: [ToolUsageItem]
-    let totalToolCalls: Int
-
-    init(usage: UsageSnapshot?, calendar: Calendar = Calendar(identifier: .gregorian), now: Date = Date()) {
-        let daily = usage?.dailyTokenUsage ?? []
-        let dayMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, $0) })
-        let todayKey = Self.dayKey(now, calendar: calendar)
-        let startOfMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: now)) ?? now
-        let dayOfMonth = max(calendar.component(.day, from: now), 1)
-        let daysInMonth = calendar.range(of: .day, in: .month, for: now)?.count ?? 30
-
-        last7Days = Self.days(count: 7, endingAt: now, calendar: calendar, dayMap: dayMap)
-        last30Days = Self.days(count: 30, endingAt: now, calendar: calendar, dayMap: dayMap)
-        let monthDays = Self.days(from: startOfMonth, through: now, calendar: calendar, dayMap: dayMap)
-
-        todayTokens = dayMap[todayKey]?.tokens ?? usage?.todayTokens ?? 0
-        todayCost = dayMap[todayKey]?.cost ?? usage?.todayCost
-        weekTokens = last7Days.reduce(0) { $0 + $1.tokens }
-        weekCost = Self.sumCost(last7Days)
-        monthTokens = monthDays.reduce(0) { $0 + $1.tokens }
-        monthCost = Self.sumCost(monthDays)
-        averageDailyTokens = monthTokens / max(dayOfMonth, 1)
-        averageDailyCost = monthCost.map { $0 / Decimal(max(dayOfMonth, 1)) }
-        projectedMonthTokens = averageDailyTokens * daysInMonth
-        projectedMonthCost = averageDailyCost.map { $0 * Decimal(daysInMonth) }
-        todayActiveSeconds = usage?.todayActiveSeconds ?? 0
-        let toolStats = usage?.toolStats ?? ToolStats()
-        totalToolCalls = toolStats.total
-        toolUsageItems = Self.toolUsageItems(from: toolStats)
-    }
-
-    private static func days(count: Int, endingAt endDate: Date, calendar: Calendar, dayMap: [String: UsageSnapshot.DailyTokenUsage]) -> [UsageSnapshot.DailyTokenUsage] {
-        (0..<count).reversed().compactMap { offset in
-            guard let date = calendar.date(byAdding: .day, value: -offset, to: endDate) else { return nil }
-            let key = dayKey(date, calendar: calendar)
-            return dayMap[key] ?? UsageSnapshot.DailyTokenUsage(date: key, tokens: 0)
+    private func installClaudeHook() {
+        do {
+            try store.installClaudeHook()
+            message = "Claude Hook 已安装并启用监控。"
+        } catch {
+            message = "安装 Claude Hook 失败：\(error.localizedDescription)"
         }
     }
 
-    private static func days(from startDate: Date, through endDate: Date, calendar: Calendar, dayMap: [String: UsageSnapshot.DailyTokenUsage]) -> [UsageSnapshot.DailyTokenUsage] {
-        let start = calendar.startOfDay(for: startDate)
-        let end = calendar.startOfDay(for: endDate)
-        let count = (calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1
-        return (0..<max(count, 1)).compactMap { offset in
-            guard let date = calendar.date(byAdding: .day, value: offset, to: start) else { return nil }
-            let key = dayKey(date, calendar: calendar)
-            return dayMap[key] ?? UsageSnapshot.DailyTokenUsage(date: key, tokens: 0)
-        }
-    }
-
-    private static func sumCost(_ values: [UsageSnapshot.DailyTokenUsage]) -> Decimal? {
-        let costs = values.compactMap(\.cost)
-        guard !costs.isEmpty else { return nil }
-        return costs.reduce(Decimal(0), +)
-    }
-
-    private static func dayKey(_ date: Date, calendar: Calendar) -> String {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
-    }
-
-    private static func toolUsageItems(from stats: ToolStats) -> [ToolUsageItem] {
-        let total = stats.total
-        guard total > 0 else { return [] }
-        return [
-            ("Bash", stats.terminalCommands),
-            ("Edit", stats.fileChanges),
-            ("Write", stats.writeStdin),
-            ("Other", stats.other)
-        ]
-        .filter { $0.1 > 0 }
-        .sorted {
-            if $0.1 == $1.1 { return $0.0 < $1.0 }
-            return $0.1 > $1.1
-        }
-        .map { name, count in
-            ToolUsageItem(
-                name: name,
-                count: count,
-                percentage: Int((Double(count) / Double(total) * 100).rounded())
-            )
+    private func uninstallClaudeHook() {
+        do {
+            try store.uninstallClaudeHook()
+            message = "Claude Hook 已卸载。"
+        } catch {
+            message = "卸载 Claude Hook 失败：\(error.localizedDescription)"
         }
     }
 }
@@ -360,16 +285,16 @@ private struct UsageForecastCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var codex: AgentSnapshot? { store.agents.first(where: { $0.kind == .codex }) }
-    private var usage: UsageCenterSummary { UsageCenterSummary(usage: codex?.usage) }
+    private var usage: UsageDomainModel { UsageDomainService.makeDomainModel(usage: codex?.usage) }
 
     var body: some View {
         GlassPanel(title: AppStrings.Sections.usageCenter) {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                compactMetric("本月累计消耗", AgentPulseFormatters.money(usage.monthCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
-                compactMetric("预计本月消耗", AgentPulseFormatters.money(usage.projectedMonthCost, privacy: store.settings.privacyMode), AgentPulseColors.thinking)
+                compactMetric("本月累计消耗", AgentPulseFormatters.money(usage.trend.monthCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
+                compactMetric("预计本月消耗", AgentPulseFormatters.money(usage.trend.projectedMonthCost, privacy: store.settings.privacyMode), AgentPulseColors.thinking)
                 compactMetric("预计剩余额度", remainingQuotaText, quotaTint)
-                compactMetric("平均每日 Token", AgentPulseFormatters.tokens(usage.averageDailyTokens), AgentPulseColors.token)
-                compactMetric(AppStrings.Metrics.averageDailyCost, AgentPulseFormatters.money(usage.averageDailyCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
+                compactMetric("平均每日 Token", AgentPulseFormatters.tokens(usage.trend.averageDailyTokens), AgentPulseColors.token)
+                compactMetric(AppStrings.Metrics.averageDailyCost, AgentPulseFormatters.money(usage.trend.averageDailyCost, privacy: store.settings.privacyMode), AgentPulseColors.working)
             }
             Text("全部基于本地 Codex 会话日志聚合；不接入第三方服务。")
                 .font(.caption)
@@ -395,40 +320,140 @@ private struct UsageForecastCard: View {
     }
 
     private var remainingQuotaText: String {
-        if let week = codex?.usage.quotaWeekRemainingPercent {
+        if let week = usage.quota.weekRemainingPercent {
             return "\(week)% 本周"
         }
-        if let fiveHour = codex?.usage.quota5hRemainingPercent {
+        if let fiveHour = usage.quota.fiveHourRemainingPercent {
             return "\(fiveHour)% 5小时"
         }
         return "待确认"
     }
 
     private var quotaTint: Color {
-        let value = codex?.usage.quotaWeekRemainingPercent ?? codex?.usage.quota5hRemainingPercent ?? 0
+        let value = usage.quota.weekRemainingPercent ?? usage.quota.fiveHourRemainingPercent ?? 0
         if value <= 20 { return AgentPulseColors.attention }
         if value <= 50 { return AgentPulseColors.thinking }
         return AgentPulseColors.working
     }
 }
 
+private enum UsageAgentFilter: String, CaseIterable, Identifiable {
+    case codex = "Codex"
+    case claude = "Claude"
+    case all = "All"
+
+    var id: String { rawValue }
+}
+
+private struct ClaudeUsageStatusCard: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let agent: AgentSnapshot?
+    let monitoringEnabled: Bool
+
+    var body: some View {
+        GlassPanel(title: "Claude") {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill((agent?.signal ?? .idle).pulseColor)
+                    .frame(width: 14, height: 14)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(statusTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(statusDetail)
+                        .font(.caption)
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                        .lineLimit(2)
+                }
+                Spacer()
+                StatusPill(title: agent?.hookInstalled == true ? "Hook 已安装" : "Hook 未安装", good: agent?.hookInstalled == true)
+            }
+
+            Divider().opacity(0.35)
+
+            EmptyState(text: "Claude 暂未提供可用 token 数据")
+
+            if let agent {
+                HStack {
+                    Text("工具事件")
+                        .font(.caption)
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                    Spacer()
+                    Text("\(agent.toolStats.total)")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                }
+                if agent.recentEvents.isEmpty {
+                    EmptyState(text: "暂无 Claude Hook 活动。")
+                } else {
+                    ForEach(agent.recentEvents.prefix(4)) { event in
+                        HStack {
+                            Text(event.signal.title)
+                                .font(.system(size: 12, weight: .medium))
+                            Text(event.message)
+                                .font(.caption)
+                                .foregroundStyle(settings.secondaryText(system: colorScheme))
+                                .lineLimit(1)
+                            Spacer()
+                            Text(event.date.formatted(date: .omitted, time: .shortened))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(settings.tertiaryText(system: colorScheme))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var statusTitle: String {
+        if !monitoringEnabled { return "Claude 监控未启用" }
+        return agent?.signal.title ?? "等待 Claude Hook 事件"
+    }
+
+    private var statusDetail: String {
+        if !monitoringEnabled { return "在 Agent 页启用 Claude，并安装 Claude Code Hook。" }
+        return agent?.currentCommand ?? "Claude 仅提供状态、工具事件和最近活动。"
+    }
+}
+
 private struct UsagePage: View {
 	    @ObservedObject var store: AgentPulseStore
 	    @Environment(\.colorScheme) private var colorScheme
+    @State private var selectedAgent: UsageAgentFilter = .codex
 	    var codex: AgentSnapshot? { store.agents.first(where: { $0.kind == .codex }) }
-	    var usageCenter: UsageCenterSummary { UsageCenterSummary(usage: codex?.usage) }
+    var claude: AgentSnapshot? { store.agents.first(where: { $0.kind == .claude }) }
+	    var usageCenter: UsageDomainModel { UsageDomainService.makeDomainModel(usage: codex?.usage) }
 	
 	    var body: some View {
 	        VStack(alignment: .leading, spacing: 16) {
+            Picker("Agent", selection: $selectedAgent) {
+                ForEach(UsageAgentFilter.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
+
+            if selectedAgent == .all || selectedAgent == .claude {
+                ClaudeUsageStatusCard(agent: claude, monitoringEnabled: store.settings.claudeMonitoringEnabled)
+            }
+
+            if selectedAgent == .all || selectedAgent == .codex {
 	            UsageHealthCard(
 	                title: usageHealthTitle,
 	                detail: usageHealthDetail,
 	                tint: usageHealthTint
 	            )
+            UsageStoryCard(
+                todayTokens: usageCenter.today.tokens,
+                topModel: usageCenter.model.topModel?.model,
+                totalCost: usageCenter.today.cost,
+                totalToolCalls: usageCenter.tool.totalCalls,
+                privacy: store.settings.privacyMode
+            )
 	            LazyVGrid(columns: metricColumns, spacing: 12) {
-                MetricTile(title: AppStrings.Metrics.todayActiveTime, value: AgentPulseFormatters.duration(usageCenter.todayActiveSeconds), tint: AgentPulseColors.working)
-                MetricTile(title: AppStrings.Metrics.todayTokens, value: AgentPulseFormatters.tokens(usageCenter.todayTokens), tint: AgentPulseColors.token)
-                MetricTile(title: AppStrings.Metrics.todayCost, value: AgentPulseFormatters.money(usageCenter.todayCost, privacy: store.settings.privacyMode), tint: AgentPulseColors.working)
+                MetricTile(title: AppStrings.Metrics.todayActiveTime, value: AgentPulseFormatters.duration(usageCenter.today.activeSeconds), tint: AgentPulseColors.working)
+                MetricTile(title: AppStrings.Metrics.todayTokens, value: AgentPulseFormatters.tokens(usageCenter.today.tokens), tint: AgentPulseColors.token)
+                MetricTile(title: AppStrings.Metrics.todayCost, value: AgentPulseFormatters.money(usageCenter.today.cost, privacy: store.settings.privacyMode), tint: AgentPulseColors.working)
             }
             GlassPanel(title: "额度") {
                 HStack {
@@ -439,8 +464,8 @@ private struct UsagePage: View {
                     Button(store.isRefreshingCodexQuota ? "刷新中…" : "刷新额度") { store.refreshCodexQuotaNow() }
                         .disabled(store.isRefreshingCodexQuota)
                 }
-                QuotaLine(title: "5 小时额度", value: codex?.usage.quota5hRemainingPercent, detail: quotaResetDetail(codex?.usage.quota5hResetAt, windowSeconds: codex?.usage.quota5hWindowSeconds))
-                QuotaLine(title: "本周额度", value: codex?.usage.quotaWeekRemainingPercent, detail: quotaResetDetail(codex?.usage.quotaWeekResetAt, windowSeconds: codex?.usage.quotaWeekWindowSeconds, includesDate: true))
+                QuotaLine(title: "5 小时额度", value: usageCenter.quota.fiveHourRemainingPercent, detail: quotaResetDetail(usageCenter.quota.fiveHourResetAt, windowSeconds: usageCenter.quota.fiveHourWindowSeconds))
+                QuotaLine(title: "本周额度", value: usageCenter.quota.weekRemainingPercent, detail: quotaResetDetail(usageCenter.quota.weekResetAt, windowSeconds: usageCenter.quota.weekWindowSeconds, includesDate: true))
                 if let quotaErrorDetail {
                     StatusNote(text: quotaErrorDetail, tone: .warning)
                 }
@@ -452,47 +477,42 @@ private struct UsagePage: View {
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
             }
             GlassPanel(title: AppStrings.Sections.tokenBreakdown) {
-                if tokenBreakdownTotal == 0 {
+                if usageCenter.token.totalBreakdownTokens == 0 {
                     EmptyState(text: "暂未解析到 input / cached / output 明细。")
                 } else {
-                    TokenBreakdownRow(title: "输入", value: codex?.usage.inputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.thinking)
-                    TokenBreakdownRow(title: "缓存输入", value: codex?.usage.cachedInputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.token)
-                    TokenBreakdownRow(title: "输出", value: codex?.usage.outputTokens ?? 0, total: tokenBreakdownTotal, tint: AgentPulseColors.working)
+                    TokenBreakdownRow(title: "输入", value: usageCenter.token.inputTokens, total: usageCenter.token.totalBreakdownTokens, tint: AgentPulseColors.thinking)
+                    TokenBreakdownRow(title: "缓存输入", value: usageCenter.token.cachedInputTokens, total: usageCenter.token.totalBreakdownTokens, tint: AgentPulseColors.token)
+                    TokenBreakdownRow(title: "输出", value: usageCenter.token.outputTokens, total: usageCenter.token.totalBreakdownTokens, tint: AgentPulseColors.working)
                 }
             }
             GlassPanel(title: "Model Usage") {
-                if modelValues.isEmpty {
+                if usageCenter.model.items.isEmpty {
                     EmptyState(text: "暂无模型使用数据")
                 } else {
-                    ForEach(modelValues) { item in
-                        ModelUsageRow(item: item, total: totalModelTokens, privacy: store.settings.privacyMode)
+                    ModelUsageInsight(model: usageCenter.model.topModel?.model)
+                    ForEach(usageCenter.model.items) { item in
+                        ModelUsageRow(item: item, total: usageCenter.model.totalTokens, privacy: store.settings.privacyMode)
                     }
                 }
             }
             GlassPanel(title: "工具调用") {
-                Text("总调用次数：\(usageCenter.totalToolCalls)")
+                Text("总调用次数：\(usageCenter.tool.totalCalls)")
                     .font(.caption)
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                if usageCenter.toolUsageItems.isEmpty {
+                if usageCenter.tool.items.isEmpty {
                     EmptyState(text: "暂无工具调用数据")
                 } else {
-                    ForEach(usageCenter.toolUsageItems) { item in
+                    ForEach(usageCenter.tool.items) { item in
                         ToolUsageRow(item: item)
                     }
                 }
             }
-            GlassPanel(title: AppStrings.Sections.agentJournal) {
-                if journalEntries.isEmpty {
-                    EmptyState(text: "今天还没有可展示的 Codex 工作段。")
-                } else {
-                    ForEach(journalEntries) { entry in
-                        JournalEntryRow(entry: entry, todayTokens: usageCenter.todayTokens, privacy: store.settings.privacyMode)
-                        if entry.id != journalEntries.last?.id {
-                            Divider().opacity(0.35)
-                        }
-                    }
-                }
-            }
+            AgentJournalCard(
+                journal: usageCenter.journal,
+                todayTokens: usageCenter.today.tokens,
+                modelName: usageCenter.model.topModel?.model,
+                privacy: store.settings.privacyMode
+            )
             GlassPanel(title: "数据来源") {
                 HStack {
                     Text("本地扫描")
@@ -506,61 +526,39 @@ private struct UsagePage: View {
                 SourceRow(title: "额度", value: codex?.usage.quotaDataSource ?? "等待首次刷新", detail: quotaUpdateDetail)
             }
             GlassPanel(title: "最近 7 天趋势") {
-                if usageCenter.last7Days.allSatisfy({ $0.tokens == 0 }) {
+                if usageCenter.trend.last7Days.allSatisfy({ $0.tokens == 0 }) {
                     EmptyState(text: "最近 7 天暂无 token 数据。")
                 } else {
-                    UsageBarChart(values: usageCenter.last7Days.map(\.tokens), labels: usageCenter.last7Days.map(\.date), tint: AgentPulseColors.working)
+                    UsageBarChart(values: usageCenter.trend.last7Days.map(\.tokens), labels: usageCenter.trend.last7Days.map(\.date), tint: AgentPulseColors.working)
                     HStack {
-                        Text(usageCenter.last7Days.first?.date ?? "")
+                        Text(usageCenter.trend.last7Days.first?.date ?? "")
                         Spacer()
                         Text("按日 token 使用量")
                         Spacer()
-                        Text(usageCenter.last7Days.last?.date ?? "")
+                        Text(usageCenter.trend.last7Days.last?.date ?? "")
                     }
                     .font(.caption)
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 }
             }
             GlassPanel(title: "最近 30 天趋势") {
-                if usageCenter.last30Days.allSatisfy({ $0.tokens == 0 }) {
+                if usageCenter.trend.last30Days.allSatisfy({ $0.tokens == 0 }) {
                     EmptyState(text: "暂无每日 token 数据。运行产生 usage 字段的 Codex 会话后，这里才会绘制柱状图。")
                 } else {
-                    UsageBarChart(values: usageCenter.last30Days.map(\.tokens), labels: usageCenter.last30Days.map(\.date), tint: AgentPulseColors.token)
+                    UsageBarChart(values: usageCenter.trend.last30Days.map(\.tokens), labels: usageCenter.trend.last30Days.map(\.date), tint: AgentPulseColors.token)
                     HStack {
-                        Text(usageCenter.last30Days.first?.date ?? "")
+                        Text(usageCenter.trend.last30Days.first?.date ?? "")
                         Spacer()
                         Text("按日 token 使用量")
                         Spacer()
-                        Text(usageCenter.last30Days.last?.date ?? "")
+                        Text(usageCenter.trend.last30Days.last?.date ?? "")
                     }
                     .font(.caption)
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 }
             }
-        }
-    }
-
-    private var modelValues: [UsageSnapshot.ModelTokenUsage] {
-        (codex?.usage.modelTokenUsage ?? [])
-            .filter { $0.tokens > 0 }
-            .sorted {
-                if $0.tokens == $1.tokens { return $0.model < $1.model }
-                return $0.tokens > $1.tokens
             }
-    }
-
-    private var journalEntries: [UsageSnapshot.JournalEntry] {
-        codex?.usage.journalEntries ?? []
-    }
-
-    private var totalModelTokens: Int {
-        max(modelValues.reduce(0) { $0 + $1.tokens }, 1)
-    }
-
-    private var tokenBreakdownTotal: Int {
-        (codex?.usage.inputTokens ?? 0)
-        + (codex?.usage.cachedInputTokens ?? 0)
-        + (codex?.usage.outputTokens ?? 0)
+        }
     }
 
     private var metricColumns: [GridItem] {
@@ -607,24 +605,24 @@ private struct UsagePage: View {
     }
 
     private var quotaUpdateDetail: String {
-        guard let date = codex?.usage.quotaUpdatedAt else {
+        guard let date = usageCenter.quota.updatedAt else {
             return "首次刷新后会优先尝试 Codex WHAM 额度接口。"
         }
         return "更新于 \(date.formatted(date: .omitted, time: .standard))。"
     }
 
     private var quotaErrorDetail: String? {
-        guard let error = codex?.usage.quotaLastError, !error.isEmpty else { return nil }
-        if let date = codex?.usage.quotaLastErrorAt {
+        guard let error = usageCenter.quota.lastError, !error.isEmpty else { return nil }
+        if let date = usageCenter.quota.lastErrorAt {
             return "WHAM 刷新失败：\(error) · \(date.formatted(date: .omitted, time: .shortened))"
         }
         return "WHAM 刷新失败：\(error)"
     }
 
     private var lowQuotaDetail: String? {
-        guard codex?.usage.quotaDataSource == "Codex WHAM 实时接口" else { return nil }
-        let fiveHour = codex?.usage.quota5hRemainingPercent
-        let week = codex?.usage.quotaWeekRemainingPercent
+        guard usageCenter.quota.dataSource == "Codex WHAM 实时接口" else { return nil }
+        let fiveHour = usageCenter.quota.fiveHourRemainingPercent
+        let week = usageCenter.quota.weekRemainingPercent
         if let fiveHour, fiveHour <= 20 {
             return "5 小时额度 ≤20%，建议等重置后再进行大任务。"
         }
@@ -662,6 +660,7 @@ private struct ConnectionsPage: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var message: String?
     @State private var sessionSummaries: [String] = []
+    @State private var showResetUsageConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -711,7 +710,7 @@ private struct ConnectionsPage: View {
                 HStack {
                     Button("复制诊断摘要") { copyDiagnostics() }
                     Button("打开 Application Support") { NSWorkspace.shared.open(AppStoragePaths().root) }
-                    Button("重扫用量") { store.resetUsageCache() }
+                    Button("重建用量缓存") { showResetUsageConfirmation = true }
                     Button("导出诊断") { exportDiagnostics() }
                     Spacer()
                 }
@@ -724,6 +723,15 @@ private struct ConnectionsPage: View {
         }
         .onAppear {
             reloadSessions()
+        }
+        .confirmationDialog("重建用量缓存？", isPresented: $showResetUsageConfirmation) {
+            Button("重建用量缓存", role: .destructive) {
+                store.resetUsageCache()
+                message = "已重建用量缓存"
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会清空本地 usage cache 并重新扫描 Codex 会话日志。不会删除 Codex 日志。")
         }
     }
 
@@ -914,6 +922,8 @@ private enum SettingsSoundPreviewPlayer {
 private struct AboutPage: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
+    @State private var updateStatus: String?
+    @State private var checkingUpdate = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -923,19 +933,244 @@ private struct AboutPage: View {
                 .foregroundStyle(AgentPulseColors.token)
             Text("AgentPulse")
                 .font(.largeTitle.weight(.bold))
-            Text("版本 1.0.1 · Codex 用量中心")
+            Text("版本 \(currentVersion) · Codex 用量中心")
                 .foregroundStyle(settings.secondaryText(system: colorScheme))
             HStack {
-                Button("打开配置目录") {
-                    NSWorkspace.shared.open(AppStoragePaths().root)
+                Button(checkingUpdate ? "检查中…" : "检查更新") {
+                    checkForUpdates()
                 }
-                Button("复制版本信息") {
-                    copy("AgentPulse 1.0.1\nConfig: \(AppStoragePaths().root.path)")
+                .disabled(checkingUpdate)
+                Button("打开下载页面") {
+                    AgentPulseUpdateChecker.openReleasesPage()
                 }
+                Button("项目主页") {
+                    AgentPulseUpdateChecker.openProjectPage()
+                }
+            }
+            if let updateStatus {
+                Text(updateStatus)
+                    .font(.caption)
+                    .foregroundStyle(settings.secondaryText(system: colorScheme))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
             }
             Spacer()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.2"
+    }
+
+    private func checkForUpdates() {
+        checkingUpdate = true
+        updateStatus = "正在检查 GitHub Release…"
+        Task {
+            do {
+                let result = try await AgentPulseUpdateChecker.check(currentVersion: currentVersion)
+                await MainActor.run {
+                    checkingUpdate = false
+                    updateStatus = result.message
+                }
+                if result.hasUpdate {
+                    try await AgentPulseUpdateChecker.downloadAndOpenInstaller(from: result.release)
+                    await MainActor.run {
+                        updateStatus = "已下载 \(result.release.displayVersion) 并打开安装包。"
+                    }
+                }
+            } catch AgentPulseUpdateChecker.UpdateError.noDMGAsset(let url) {
+                await MainActor.run {
+                    checkingUpdate = false
+                    updateStatus = "发现新版本，但 Release 没有 DMG 安装包。已打开下载页面。"
+                    _ = NSWorkspace.shared.open(url)
+                }
+            } catch {
+                await MainActor.run {
+                    checkingUpdate = false
+                    updateStatus = "检查更新失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+}
+
+private enum AgentPulseUpdateChecker {
+    private static let latestReleaseURL = URL(string: "https://api.github.com/repos/AtoposAC/AgentPulse/releases/latest")!
+    private static let releasesPageURL = URL(string: "https://github.com/AtoposAC/AgentPulse/releases")!
+    private static let projectPageURL = URL(string: "https://github.com/AtoposAC/AgentPulse")!
+
+    enum UpdateError: LocalizedError {
+        case networkUnavailable
+        case rateLimited
+        case releaseNotFound
+        case noDMGAsset(URL)
+        case badServerResponse(Int)
+        case invalidReleaseData
+
+        var errorDescription: String? {
+            switch self {
+            case .networkUnavailable:
+                "无法连接网络或 GitHub，请检查网络后重试。"
+            case .rateLimited:
+                "GitHub API 暂时限流，请稍后重试或打开下载页面。"
+            case .releaseNotFound:
+                "没有找到可用的 GitHub Release。"
+            case .noDMGAsset:
+                "最新 Release 没有 DMG 安装包。"
+            case .badServerResponse(let status):
+                "GitHub 返回异常状态码 \(status)。"
+            case .invalidReleaseData:
+                "GitHub Release 数据格式无法识别。"
+            }
+        }
+    }
+
+    struct Result {
+        let hasUpdate: Bool
+        let message: String
+        let release: GitHubRelease
+    }
+
+    struct GitHubRelease: Decodable {
+        struct Asset: Decodable {
+            let name: String
+            let browserDownloadURL: URL
+
+            enum CodingKeys: String, CodingKey {
+                case name
+                case browserDownloadURL = "browser_download_url"
+            }
+        }
+
+        let tagName: String
+        let htmlURL: URL
+        let assets: [Asset]
+
+        enum CodingKeys: String, CodingKey {
+            case tagName = "tag_name"
+            case htmlURL = "html_url"
+            case assets
+        }
+
+        var displayVersion: String {
+            tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        }
+
+        var dmgAsset: Asset? {
+            assets.first { $0.name.lowercased().hasSuffix(".dmg") }
+        }
+    }
+
+    static func check(currentVersion: String) async throws -> Result {
+        var request = URLRequest(url: latestReleaseURL)
+        request.timeoutInterval = 12
+        request.setValue("AgentPulse", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+        } catch let error as URLError {
+            throw classifiedNetworkError(error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateError.invalidReleaseData
+        }
+        switch http.statusCode {
+        case 200..<300:
+            break
+        case 403, 429:
+            throw UpdateError.rateLimited
+        case 404:
+            throw UpdateError.releaseNotFound
+        default:
+            throw UpdateError.badServerResponse(http.statusCode)
+        }
+        let release: GitHubRelease
+        do {
+            release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        } catch {
+            throw UpdateError.invalidReleaseData
+        }
+        let hasUpdate = compare(release.displayVersion, currentVersion) == .orderedDescending
+        let message = hasUpdate
+            ? "发现新版本 \(release.displayVersion)，正在准备下载…"
+            : "当前已是最新版本 \(currentVersion)。"
+        return Result(hasUpdate: hasUpdate, message: message, release: release)
+    }
+
+    static func downloadAndOpenInstaller(from release: GitHubRelease) async throws {
+        guard let asset = release.dmgAsset else {
+            throw UpdateError.noDMGAsset(release.htmlURL)
+        }
+        let temporaryURL: URL
+        let response: URLResponse
+        do {
+            (temporaryURL, response) = try await URLSession(configuration: .ephemeral).download(from: asset.browserDownloadURL)
+        } catch let error as URLError {
+            throw classifiedNetworkError(error)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateError.invalidReleaseData
+        }
+        switch http.statusCode {
+        case 200..<300:
+            break
+        case 403, 429:
+            throw UpdateError.rateLimited
+        case 404:
+            throw UpdateError.noDMGAsset(release.htmlURL)
+        default:
+            throw UpdateError.badServerResponse(http.statusCode)
+        }
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+        let destination = downloads.appendingPathComponent(asset.name)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        await MainActor.run {
+            _ = NSWorkspace.shared.open(destination)
+        }
+    }
+
+    static func openReleasesPage() {
+        NSWorkspace.shared.open(releasesPageURL)
+    }
+
+    static func openProjectPage() {
+        NSWorkspace.shared.open(projectPageURL)
+    }
+
+    private static func classifiedNetworkError(_ error: URLError) -> Error {
+        switch error.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .timedOut:
+            UpdateError.networkUnavailable
+        default:
+            error
+        }
+    }
+
+    private static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let left = versionParts(lhs)
+        let right = versionParts(rhs)
+        let count = max(left.count, right.count)
+        for index in 0..<count {
+            let leftValue = index < left.count ? left[index] : 0
+            let rightValue = index < right.count ? right[index] : 0
+            if leftValue > rightValue { return .orderedDescending }
+            if leftValue < rightValue { return .orderedAscending }
+        }
+        return .orderedSame
+    }
+
+    private static func versionParts(_ version: String) -> [Int] {
+        version
+            .trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+            .split(separator: ".")
+            .map { Int($0) ?? 0 }
     }
 }
 
@@ -1141,22 +1376,194 @@ private struct MetricTile: View {
     }
 }
 
+private enum JournalRange: String, CaseIterable, Identifiable {
+    case today = "今天"
+    case yesterday = "昨天"
+    case last7Days = "近 7 天"
+
+    var id: String { rawValue }
+}
+
+private struct AgentJournalCard: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let journal: UsageDomainModel.JournalSummary
+    let todayTokens: Int
+    let modelName: String?
+    let privacy: Bool
+
+    @State private var range: JournalRange = .today
+    @State private var expandedCurrentDay = false
+    @State private var expandedYesterday = false
+    @State private var expandedGroups: Set<String> = []
+    @State private var didInitializeExpandedGroups = false
+
+    var body: some View {
+        GlassPanel(title: AppStrings.Sections.agentJournal) {
+            Picker("Journal 范围", selection: $range) {
+                ForEach(JournalRange.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            switch range {
+            case .today:
+                journalList(
+                    entries: journal.todayEntries,
+                    totalTokens: todayTokens,
+                    expanded: $expandedCurrentDay,
+                    emptyText: "今天还没有可展示的 Codex 工作段。"
+                )
+            case .yesterday:
+                journalList(
+                    entries: journal.yesterdayEntries,
+                    totalTokens: journal.yesterdayEntries.reduce(0) { $0 + $1.tokens },
+                    expanded: $expandedYesterday,
+                    emptyText: "昨天没有可展示的 Codex 工作段。"
+                )
+            case .last7Days:
+                last7DayList
+            }
+        }
+    }
+
+    private var last7DayList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if journal.last7DayGroups.isEmpty {
+                EmptyState(text: "最近 7 天还没有可展示的 Codex 工作段。")
+            } else {
+                ForEach(journal.last7DayGroups) { group in
+                    journalGroup(group)
+                    if group.id != journal.last7DayGroups.last?.id {
+                        Divider().opacity(0.35)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            guard !didInitializeExpandedGroups, let first = journal.last7DayGroups.first else { return }
+            didInitializeExpandedGroups = true
+            expandedGroups.insert(first.date)
+        }
+    }
+
+    private func journalGroup(_ group: UsageDomainModel.JournalSummary.DayGroup) -> some View {
+        let isExpanded = expandedGroups.contains(group.date)
+        return VStack(alignment: .leading, spacing: 10) {
+            Button {
+                if expandedGroups.contains(group.date) {
+                    expandedGroups.remove(group.date)
+                } else {
+                    expandedGroups.insert(group.date)
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 12)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(dayTitle(group.date))
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("\(group.entries.count) 个工作段 · \(AgentPulseFormatters.duration(group.totalDurationSeconds)) · \(AgentPulseFormatters.tokens(group.totalTokens))")
+                            .font(.caption)
+                            .foregroundStyle(settings.secondaryText(system: colorScheme))
+                    }
+                    Spacer()
+                    Text(AgentPulseFormatters.money(group.totalCost, privacy: privacy))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                journalEntries(group.entries, totalTokens: group.totalTokens, limit: nil)
+                    .padding(.leading, 22)
+            }
+        }
+    }
+
+    private func journalList(entries: [UsageSnapshot.JournalEntry], totalTokens: Int, expanded: Binding<Bool>, emptyText: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if entries.isEmpty {
+                EmptyState(text: emptyText)
+            } else {
+                HStack {
+                    Text("\(entries.count) 个工作段")
+                        .font(.caption)
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                    Spacer()
+                    if entries.count > collapsedLimit {
+                        Button(expanded.wrappedValue ? "收起" : "展开全部 \(entries.count) 条") {
+                            expanded.wrappedValue.toggle()
+                        }
+                        .font(.caption)
+                    }
+                }
+                journalEntries(entries, totalTokens: totalTokens, limit: expanded.wrappedValue ? nil : collapsedLimit)
+            }
+        }
+    }
+
+    private func journalEntries(_ entries: [UsageSnapshot.JournalEntry], totalTokens: Int, limit: Int?) -> some View {
+        let visibleEntries = limit.map { Array(entries.prefix($0)) } ?? entries
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(visibleEntries) { entry in
+                JournalEntryRow(entry: entry, dayTokens: totalTokens, modelName: modelName, privacy: privacy)
+                if entry.id != visibleEntries.last?.id {
+                    Divider().opacity(0.35)
+                }
+            }
+        }
+    }
+
+    private var collapsedLimit: Int { 5 }
+
+    private func dayTitle(_ day: String) -> String {
+        if day == dayKey(Date()) {
+            return "今天"
+        }
+        if let yesterday = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: Date()),
+           day == dayKey(yesterday) {
+            return "昨天"
+        }
+        return day
+    }
+
+    private func dayKey(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+}
+
 private struct JournalEntryRow: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
     let entry: UsageSnapshot.JournalEntry
-    let todayTokens: Int
+    let dayTokens: Int
+    let modelName: String?
     let privacy: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(AgentPulseColors.working.opacity(0.75))
-                    .frame(width: 4, height: 22)
+                    .frame(width: 4, height: 34)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(time(entry.startedAt)) - \(time(entry.endedAt))")
+                    Text("\(time(entry.startedAt)) - \(time(entry.endedAt)) · \(AgentPulseFormatters.duration(entry.durationSeconds))")
                         .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    if let modelName {
+                        Text("主要模型：\(modelName)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(settings.secondaryText(system: colorScheme))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Text(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)
                         .font(.system(size: 11))
                         .foregroundStyle(settings.tertiaryText(system: colorScheme))
@@ -1164,13 +1571,17 @@ private struct JournalEntryRow: View {
                         .truncationMode(.middle)
                 }
                 Spacer()
-                Text(AgentPulseFormatters.duration(entry.durationSeconds))
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(settings.primaryText(system: colorScheme))
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(AgentPulseFormatters.tokens(entry.tokens))
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    Text(AgentPulseFormatters.money(entry.cost, privacy: privacy))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                }
             }
             HStack(spacing: 8) {
                 journalMetric("Token", AgentPulseFormatters.tokens(entry.tokens), tint: AgentPulseColors.token)
-                journalMetric("占今日", tokenShareText, tint: AgentPulseColors.working)
+                journalMetric("占本日", tokenShareText, tint: AgentPulseColors.working)
                 journalMetric("Cost", AgentPulseFormatters.money(entry.cost, privacy: privacy), tint: AgentPulseColors.thinking)
             }
         }
@@ -1201,12 +1612,45 @@ private struct JournalEntryRow: View {
     }
 
     private var tokenShareText: String {
-        guard todayTokens > 0 else { return "--" }
-        let percent = Double(entry.tokens) / Double(todayTokens) * 100
+        guard dayTokens > 0 else { return "--" }
+        let percent = Double(entry.tokens) / Double(dayTokens) * 100
         if percent > 0, percent < 0.1 {
             return "<0.1%"
         }
         return String(format: "%.0f%%", percent.rounded())
+    }
+}
+
+private struct UsageStoryCard: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let todayTokens: Int
+    let topModel: String?
+    let totalCost: Decimal?
+    let totalToolCalls: Int
+    let privacy: Bool
+
+    var body: some View {
+        GlassPanel(title: "今日使用概览") {
+            VStack(alignment: .leading, spacing: 8) {
+                storyLine("今日使用 \(AgentPulseFormatters.tokens(todayTokens))")
+                storyLine("主要模型：\(topModel ?? "暂无模型数据")")
+                storyLine("主要活动：\(activityText)")
+                storyLine("今日花费：\(AgentPulseFormatters.money(totalCost, privacy: privacy))")
+            }
+        }
+    }
+
+    private var activityText: String {
+        totalToolCalls > 0 ? "编码与工具调用" : "编码"
+    }
+
+    private func storyLine(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(settings.primaryText(system: colorScheme))
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
     }
 }
 
@@ -1457,7 +1901,7 @@ private struct QuotaLine: View {
     private func barWidth(totalWidth: CGFloat) -> CGFloat {
         guard let value else { return 0 }
         guard value > 0 else { return 0 }
-        return max(8, totalWidth * CGFloat(min(max(value, 0), 100)) / 100)
+        return totalWidth * CGFloat(min(max(value, 0), 100)) / 100
     }
 }
 
@@ -1626,6 +2070,28 @@ private struct ModelUsageRow: View {
     }
 }
 
+private struct ModelUsageInsight: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let model: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("最常用模型")
+                .font(.caption)
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+            Text(model ?? "暂无模型数据")
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text("按 Token 使用量排序")
+                .font(.caption)
+                .foregroundStyle(settings.tertiaryText(system: colorScheme))
+        }
+        .padding(.bottom, 4)
+    }
+}
+
 private struct TokenBreakdownRow: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
@@ -1685,7 +2151,7 @@ private struct TokenBreakdownRow: View {
 private struct ToolUsageRow: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
-    let item: UsageCenterSummary.ToolUsageItem
+    let item: UsageDomainModel.ToolSummary.Item
 
     var body: some View {
         HStack {

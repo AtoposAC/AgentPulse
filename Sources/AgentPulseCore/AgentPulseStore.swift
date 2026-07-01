@@ -14,9 +14,11 @@ public final class AgentPulseStore: ObservableObject {
     private var usageCache: UsageCache
     private var timer: Timer?
     private var stateWatcher: StateFileWatcher?
+    private var claudeHookWatcher: ClaudeHookWatcher?
     private var lastQuotaFetchAt: Date?
     private var lastUsageScanAt: Date?
     private var forceNextUsageScan = false
+    private var didRunLaunchHydration = false
     private var codexRefreshInFlight = false
     private var hasObservedCodexStateThisRun = false
     private let codexRefreshQueue = DispatchQueue(label: "app.agentpulse.codex-session-refresh", qos: .utility)
@@ -35,7 +37,7 @@ public final class AgentPulseStore: ObservableObject {
         self.usageCache = usageCacheStore.load(default: UsageCache())
         self.agents = stateStore.load(default: [
             AgentSnapshot(kind: .codex, signal: .idle, hookInstalled: false)
-        ]).filter { $0.kind != .claude }
+        ]).filter { $0.kind == .codex || $0.kind == .claude }
     }
 
     public func start() {
@@ -44,6 +46,7 @@ public final class AgentPulseStore: ObservableObject {
             self?.mergePersistedState()
         }
         stateWatcher?.start()
+        configureClaudeMonitoring()
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -52,11 +55,20 @@ public final class AgentPulseStore: ObservableObject {
         }
     }
 
+    public func refreshLaunchDataOnce() {
+        guard !didRunLaunchHydration else { return }
+        didRunLaunchHydration = true
+        guard settings.codexMonitoringEnabled else { return }
+        refreshCodexQuota(force: true)
+    }
+
     public func stop() {
         timer?.invalidate()
         timer = nil
         stateWatcher?.stop()
         stateWatcher = nil
+        claudeHookWatcher?.stop()
+        claudeHookWatcher = nil
     }
 
     public func refresh() {
@@ -71,7 +83,7 @@ public final class AgentPulseStore: ObservableObject {
         } else {
             removeAgent(.codex)
         }
-        removeAgent(.claude)
+        refreshClaudeStatus()
         persist()
     }
 
@@ -80,6 +92,10 @@ public final class AgentPulseStore: ObservableObject {
         self.settings = settings
         try? settingsStore.save(settings)
         if shouldRefreshAfterSettingsChange(from: oldSettings, to: settings) {
+            refresh()
+        }
+        if oldSettings.claudeMonitoringEnabled != settings.claudeMonitoringEnabled {
+            configureClaudeMonitoring()
             refresh()
         }
     }
@@ -114,14 +130,16 @@ public final class AgentPulseStore: ObservableObject {
 
     public var visibleAgents: [AgentSnapshot] {
         if settings.monitoringPaused {
-            let kinds = agents.filter { $0.kind != .claude }.isEmpty ? [AgentKind.codex] : agents.filter { $0.kind != .claude }.map(\.kind)
-            return kinds.map {
+            let kinds = agents
+                .filter { $0.kind == .codex || $0.kind == .claude }
+                .map(\.kind)
+            return (kinds.isEmpty ? [AgentKind.codex] : kinds).map {
                 AgentSnapshot(kind: $0, signal: .idle, currentCommand: "监控已暂停", updatedAt: Date())
             }
         }
         let activityWindow: TimeInterval = 120
         let active = agents.filter { snapshot in
-            if snapshot.kind == .claude { return false }
+            guard snapshot.kind == .codex || snapshot.kind == .claude else { return false }
             if snapshot.signal != .idle {
                 return true
             }
@@ -137,6 +155,8 @@ public final class AgentPulseStore: ObservableObject {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
     }
 
+    public var claudeSettingsURL: URL { HookManager.claudeSettingsURL }
+    public var claudeHookLogURL: URL { HookManager.claudeHookLogURL }
     public var stateFileURL: URL { paths.state }
     public var settingsFileURL: URL { paths.settings }
     public var usageCacheFileURL: URL { paths.usageCache }
@@ -176,6 +196,24 @@ public final class AgentPulseStore: ObservableObject {
                 completion(summaries)
             }
         }
+    }
+
+    public func installClaudeHook() throws {
+        try HookManager.installClaudeHook()
+        var copy = settings
+        copy.claudeMonitoringEnabled = true
+        updateSettings(copy)
+        refreshClaudeStatus()
+        persist()
+    }
+
+    public func uninstallClaudeHook() throws {
+        try HookManager.uninstallClaudeHook()
+        var copy = settings
+        copy.claudeMonitoringEnabled = false
+        updateSettings(copy)
+        removeAgent(.claude)
+        persist()
     }
 
     public func diagnosticSummary() -> String {
@@ -366,6 +404,83 @@ public final class AgentPulseStore: ObservableObject {
         usage.quotaLastErrorAt = existing.quotaLastErrorAt
     }
 
+    private func configureClaudeMonitoring() {
+        claudeHookWatcher?.stop()
+        claudeHookWatcher = nil
+        guard settings.claudeMonitoringEnabled else { return }
+        let watcher = ClaudeHookWatcher(
+            logURL: HookManager.claudeHookLogURL,
+            onEvent: { [weak self] event in
+                self?.applyClaudeHookEvent(event)
+            },
+            onDiagnostics: { [weak self] _ in
+                self?.refreshClaudeStatus()
+            }
+        )
+        claudeHookWatcher = watcher
+        watcher.start()
+        refreshClaudeStatus()
+    }
+
+    private func refreshClaudeStatus() {
+        guard settings.claudeMonitoringEnabled else {
+            removeAgent(.claude)
+            return
+        }
+        var snapshot = agents.first(where: { $0.kind == .claude }) ?? AgentSnapshot(kind: .claude)
+        snapshot.hookInstalled = HookManager.isClaudeHookInstalled()
+        if !snapshot.hookInstalled {
+            snapshot.signal = .attention
+            snapshot.currentCommand = "Claude Hook 未安装"
+            snapshot.statusReason = "需要在 Agent 页安装 Claude Code Hook"
+            snapshot.updatedAt = Date()
+        } else if Date().timeIntervalSince(snapshot.updatedAt) > 180, snapshot.signal != .idle {
+            snapshot.signal = .idle
+            snapshot.currentCommand = "Claude 空闲"
+            snapshot.statusReason = "等待 Claude Code Hook 事件"
+            snapshot.updatedAt = Date()
+        } else if snapshot.currentCommand == nil {
+            snapshot.signal = .idle
+            snapshot.currentCommand = "等待 Claude Code Hook 事件"
+            snapshot.statusReason = "来自 \(HookManager.claudeHookLogURL.lastPathComponent)"
+            snapshot.updatedAt = Date()
+        }
+        upsert(snapshot)
+    }
+
+    private func applyClaudeHookEvent(_ event: ClaudeHookEvent) {
+        guard settings.claudeMonitoringEnabled else { return }
+        var snapshot = agents.first(where: { $0.kind == .claude }) ?? AgentSnapshot(kind: .claude)
+        snapshot.signal = event.signal
+        snapshot.currentCommand = event.message
+        snapshot.statusReason = event.toolName.map { "Claude Hook · \(event.type) · \($0)" } ?? "Claude Hook · \(event.type)"
+        snapshot.updatedAt = event.date
+        snapshot.hookInstalled = HookManager.isClaudeHookInstalled()
+        snapshot.recentEvents = ([AgentEvent(kind: .claude, signal: event.signal, message: event.message)] + snapshot.recentEvents).prefix(50).map { $0 }
+        if event.signal == .working {
+            incrementClaudeToolStats(toolName: event.toolName, snapshot: &snapshot)
+        }
+        upsert(snapshot)
+        persist()
+    }
+
+    private func incrementClaudeToolStats(toolName: String?, snapshot: inout AgentSnapshot) {
+        let name = toolName?.lowercased() ?? ""
+        if name.contains("read") || name.contains("open") || name.contains("view") {
+            snapshot.toolStats.readOperations += 1
+        } else if name.contains("edit") || name.contains("write") || name.contains("patch") {
+            snapshot.toolStats.fileChanges += 1
+        } else if name.contains("search") || name.contains("grep") || name.contains("glob") {
+            snapshot.toolStats.searchOperations += 1
+        } else if name.contains("web") || name.contains("browser") {
+            snapshot.toolStats.webRequests += 1
+        } else if name.contains("bash") || name.contains("shell") || name.contains("command") {
+            snapshot.toolStats.terminalCommands += 1
+        } else {
+            snapshot.toolStats.other += 1
+        }
+    }
+
     private func applyWorkingTime(existing: AgentSnapshot?, to snapshot: inout AgentSnapshot, at now: Date, allowIncrement: Bool) {
         let todayKey = Self.dayKey(now)
         var usage = snapshot.usage
@@ -502,7 +617,7 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private func toolStatsSummary(_ stats: ToolStats) -> String {
-        "terminal \(stats.terminalCommands), files \(stats.fileChanges), write_stdin \(stats.writeStdin), other \(stats.other), total \(stats.total)"
+        "terminal \(stats.terminalCommands), read \(stats.readOperations), files \(stats.fileChanges), write_stdin \(stats.writeStdin), search \(stats.searchOperations), web \(stats.webRequests), other \(stats.other), total \(stats.total)"
     }
 
     private func codexStatusAgeSummary(_ codex: AgentSnapshot?) -> String {
@@ -631,6 +746,7 @@ public final class AgentPulseStore: ObservableObject {
     private func mergePersistedState() {
         let persisted = stateStore.load(default: [AgentSnapshot]())
         for snapshot in persisted {
+            guard snapshot.kind == .codex || snapshot.kind == .claude else { continue }
             if snapshot.updatedAt > (agents.first(where: { $0.kind == snapshot.kind })?.updatedAt ?? .distantPast) {
                 upsert(snapshot)
             }

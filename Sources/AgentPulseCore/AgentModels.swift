@@ -52,18 +52,55 @@ public enum AgentSignal: String, Codable, CaseIterable, Identifiable, Comparable
 
 public struct ToolStats: Codable, Equatable, Sendable {
     public var terminalCommands: Int
+    public var readOperations: Int
     public var fileChanges: Int
     public var writeStdin: Int
+    public var searchOperations: Int
+    public var webRequests: Int
     public var other: Int
 
-    public init(terminalCommands: Int = 0, fileChanges: Int = 0, writeStdin: Int = 0, other: Int = 0) {
+    public init(
+        terminalCommands: Int = 0,
+        readOperations: Int = 0,
+        fileChanges: Int = 0,
+        writeStdin: Int = 0,
+        searchOperations: Int = 0,
+        webRequests: Int = 0,
+        other: Int = 0
+    ) {
         self.terminalCommands = terminalCommands
+        self.readOperations = readOperations
         self.fileChanges = fileChanges
         self.writeStdin = writeStdin
+        self.searchOperations = searchOperations
+        self.webRequests = webRequests
         self.other = other
     }
 
-    public var total: Int { terminalCommands + fileChanges + writeStdin + other }
+    public var total: Int {
+        terminalCommands + readOperations + fileChanges + writeStdin + searchOperations + webRequests + other
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case terminalCommands
+        case readOperations
+        case fileChanges
+        case writeStdin
+        case searchOperations
+        case webRequests
+        case other
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        terminalCommands = try container.decodeIfPresent(Int.self, forKey: .terminalCommands) ?? 0
+        readOperations = try container.decodeIfPresent(Int.self, forKey: .readOperations) ?? 0
+        fileChanges = try container.decodeIfPresent(Int.self, forKey: .fileChanges) ?? 0
+        writeStdin = try container.decodeIfPresent(Int.self, forKey: .writeStdin) ?? 0
+        searchOperations = try container.decodeIfPresent(Int.self, forKey: .searchOperations) ?? 0
+        webRequests = try container.decodeIfPresent(Int.self, forKey: .webRequests) ?? 0
+        other = try container.decodeIfPresent(Int.self, forKey: .other) ?? 0
+    }
 }
 
 public struct AgentPulseHealthCheck: Identifiable, Equatable, Sendable {

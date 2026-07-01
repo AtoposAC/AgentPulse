@@ -21,40 +21,13 @@ let moneyFormatter: NumberFormatter = {
 switch arguments.first {
 case "status":
     let agents = stateStore.load(default: [])
-    if agents.isEmpty {
+    let codexAgents = agents.filter { $0.kind == .codex }
+    if codexAgents.isEmpty {
         print("还没有 AgentPulse 状态。")
     } else {
-        for agent in agents {
+        for agent in codexAgents {
             print("\(agent.kind.displayName): \(agent.signal.title) · \(agent.currentCommand ?? "空闲")")
         }
-    }
-case "set":
-    let args = Array(arguments.dropFirst())
-	    guard args.count >= 2,
-	          let kind = AgentKind(rawValue: args[0]),
-	          kind != .claude,
-	          let signal = AgentSignal(rawValue: args[1]) else {
-	        print("用法：agentpulse-cli set <codex|local> <idle|thinking|working|done|attention> [message]")
-	        Foundation.exit(2)
-	    }
-    let message = args.dropFirst(2).joined(separator: " ")
-    var agents = stateStore.load(default: [])
-    var snapshot = agents.first(where: { $0.kind == kind }) ?? AgentSnapshot(kind: kind)
-    snapshot.signal = signal
-    snapshot.currentCommand = message.isEmpty ? signal.title : message
-    snapshot.updatedAt = Date()
-    snapshot.recentEvents = ([AgentEvent(kind: kind, signal: signal, message: snapshot.currentCommand ?? signal.title)] + snapshot.recentEvents).prefix(50).map { $0 }
-    if let index = agents.firstIndex(where: { $0.kind == kind }) {
-        agents[index] = snapshot
-    } else {
-        agents.append(snapshot)
-    }
-    do {
-        try stateStore.save(agents)
-        print("\(kind.displayName) -> \(signal.title)")
-    } catch {
-        fputs("写入 AgentPulse 状态失败：\(error.localizedDescription)\n", stderr)
-        Foundation.exit(1)
     }
 case "reset-window":
     UserDefaults.standard.removeObject(forKey: "floatingPanel.x")
@@ -63,6 +36,23 @@ case "reset-window":
 case "reset-usage-cache":
     try? JSONFileStore<UsageCache>(url: paths.usageCache).save(UsageCache())
     print("用量缓存已重置。")
+case "install-claude-hook":
+    do {
+        try HookManager.installClaudeHook()
+        print("Claude Hook 已安装：\(HookManager.hookScriptURL.path)")
+        print("Claude Hook 日志：\(HookManager.claudeHookLogURL.path)")
+    } catch {
+        fputs("安装 Claude Hook 失败：\(error.localizedDescription)\n", stderr)
+        Foundation.exit(1)
+    }
+case "uninstall-claude-hook":
+    do {
+        try HookManager.uninstallClaudeHook()
+        print("Claude Hook 已卸载。")
+    } catch {
+        fputs("卸载 Claude Hook 失败：\(error.localizedDescription)\n", stderr)
+        Foundation.exit(1)
+    }
 case "diagnostics":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let usageCache = JSONFileStore<UsageCache>(url: paths.usageCache).load(default: UsageCache())
@@ -255,7 +245,7 @@ case "diagnose-quota-raw":
 case "scan-usage":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
-    let scan = CodexUsageScanner.scanDailyTokens(
+    let scan = CodexUsageScanner.scanUsage(
         root: root,
         options: CodexUsageScanner.Options(
             estimateInternalModelCost: settings.estimateCodexInternalCost,
@@ -288,6 +278,16 @@ case "scan-usage":
             print("  - \(item.model): \(item.tokens) tokens · \(percent)% · \(money(item.cost))")
         }
     }
+    print("- journal entries: \(scan.journalEntries.count)")
+    if scan.journalEntries.isEmpty {
+        print("  - none")
+    } else {
+        for entry in scan.journalEntries.prefix(5) {
+            let duration = Int(max(0, entry.endedAt.timeIntervalSince(entry.startedAt)).rounded())
+            let file = URL(fileURLWithPath: entry.sourcePath).lastPathComponent
+            print("  - \(quotaDateFormatter.string(from: entry.startedAt)) - \(quotaDateFormatter.string(from: entry.endedAt)): \(duration)s · \(entry.tokens) tokens · \(money(entry.cost)) · \(file)")
+        }
+    }
 	default:
 	    print("""
 	    AgentPulse CLI
@@ -298,9 +298,10 @@ case "scan-usage":
 	      diagnose-quota-raw    Print redacted WHAM window parse details
 	      diagnostics           输出本地状态、来源、用量和额度摘要
 	      doctor                Run a quick health check for sessions, usage, status, and UI settings
+	      install-claude-hook   Install Claude Code Hook for status monitoring
 	      scan-usage            Scan Codex sessions and print daily/model usage
 	      status                Print current AgentPulse state
-	      set                   Write a local agent state
+	      uninstall-claude-hook Remove AgentPulse Claude Code Hook
 	      reset-window          Reset saved floating window position
 	      reset-usage-cache     Clear cached usage scan results
 	    """)

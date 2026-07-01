@@ -15,12 +15,18 @@
 
 ## v1.0.2
 
+- Usage Center 信息架构优化
+- Agent Journal 工作段与近 7 天历史
 - GitHub Release 检查
+- Claude Code Hook 状态监测
 
 ## v1.0.3
 
-- 自动更新
+- Claude Hook 兼容性验证
+- CLI diagnostics 口径统一
+- Journal 导出
 
 ## Coming Soon
 
-- Claude Code
+- Sparkle 自动更新
+- Claude usage 可用则显示
