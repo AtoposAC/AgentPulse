@@ -177,6 +177,18 @@ AgentPulse 支持跟随系统外观，也可以在偏好设置中手动选择浅
 
 当前更新检查会下载并打开 DMG，由用户手动替换应用。等接入 Developer ID 签名和公证后，可以进一步支持 Sparkle 自动更新。
 
+## 如何更新
+
+AgentPulse 目前使用 GitHub Releases 分发，不会自动替换正在运行的 App。
+
+1. 在 AgentPulse 的 About 页面点击“检查更新”。
+2. 如果发现新版本，AgentPulse 会显示当前版本、最新版本、Release 页面和 DMG 名称。
+3. 下载完成后会自动打开 DMG。
+4. 关闭正在运行的 AgentPulse。
+5. 将 DMG 中的新版本拖拽到 Applications，覆盖旧版本。
+
+如果下载失败，也可以直接打开 [Releases 页面](https://github.com/AtoposAC/AgentPulse/releases) 手动下载最新的 `AgentPulse.dmg`。
+
 ## 构建
 
 需要 macOS 14 或更高版本。
@@ -210,11 +222,15 @@ AgentPulse 附带本地诊断 CLI。
 .build/debug/agentpulse-cli diagnose-codex
 .build/debug/agentpulse-cli diagnose-quota
 .build/debug/agentpulse-cli diagnose-quota-raw
+.build/debug/agentpulse-cli diagnose-claude-hook
+.build/debug/agentpulse-cli test-claude-hook
 .build/debug/agentpulse-cli install-claude-hook
 .build/debug/agentpulse-cli uninstall-claude-hook
+.build/debug/agentpulse-cli export-journal --days 7
 ```
 
 其中 `scan-usage` 会输出 Codex 每日用量、模型用量和最近 Journal 工作段，适合排查本地数据扫描是否正常。
+`export-journal --days 7` 会把最近 7 天的 Agent Journal 以 Markdown 输出，适合归档或排查工作段。
 
 ## 数据来源
 

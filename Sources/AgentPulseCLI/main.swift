@@ -21,11 +21,11 @@ let moneyFormatter: NumberFormatter = {
 switch arguments.first {
 case "status":
     let agents = stateStore.load(default: [])
-    let codexAgents = agents.filter { $0.kind == .codex }
-    if codexAgents.isEmpty {
+    let visibleAgents = agents.filter { $0.kind == .codex || $0.kind == .claude }
+    if visibleAgents.isEmpty {
         print("还没有 AgentPulse 状态。")
     } else {
-        for agent in codexAgents {
+        for agent in visibleAgents {
             print("\(agent.kind.displayName): \(agent.signal.title) · \(agent.currentCommand ?? "空闲")")
         }
     }
@@ -53,14 +53,26 @@ case "uninstall-claude-hook":
         fputs("卸载 Claude Hook 失败：\(error.localizedDescription)\n", stderr)
         Foundation.exit(1)
     }
+case "diagnose-claude-hook":
+    printClaudeHookDiagnostics()
+case "test-claude-hook":
+    do {
+        try HookManager.writeTestClaudeHookEvent()
+        print("已写入 Claude Hook 测试事件：\(HookManager.claudeHookLogURL.path)")
+    } catch {
+        fputs("写入 Claude Hook 测试事件失败：\(error.localizedDescription)\n", stderr)
+        Foundation.exit(1)
+    }
 case "diagnostics":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let usageCache = JSONFileStore<UsageCache>(url: paths.usageCache).load(default: UsageCache())
     let agents = stateStore.load(default: [])
     let codex = agents.first(where: { $0.kind == .codex })
+    let claude = agents.first(where: { $0.kind == .claude })
+    let claudeHook = HookManager.diagnoseClaudeHook()
     let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
     let usageScanDate = Date()
-    let scan = CodexUsageScanner.scanDailyTokens(
+    let scan = CodexUsageScanner.scanUsage(
         root: root,
         options: CodexUsageScanner.Options(
             estimateInternalModelCost: settings.estimateCodexInternalCost,
@@ -82,11 +94,14 @@ case "diagnostics":
         usage.inputTokens = scan.models.reduce(0) { $0 + $1.inputTokens }
         usage.cachedInputTokens = scan.models.reduce(0) { $0 + $1.cachedInputTokens }
         usage.outputTokens = scan.models.reduce(0) { $0 + $1.outputTokens }
+        usage.journalEntries = scan.journalEntries
         usage.usageScannedAt = usageScanDate
         usage.scannedFileCount = scan.cache.files.count
         usage.latestSessionPath = latestSession?.path
         usage.latestSessionModifiedAt = latestSession.flatMap(latestModificationDate)
     }
+    let domain = UsageDomainService.makeDomainModel(usage: usage)
+    let journalActiveSeconds = domain.journal.todayEntries.reduce(0) { $0 + $1.durationSeconds }
     let costSource = "日志真实 cost 字段；缺失时使用隐藏模型费率表"
     let models = usage.modelTokenUsage
     let modelTotal = max(models.reduce(0) { $0 + $1.tokens }, 1)
@@ -116,6 +131,15 @@ case "diagnostics":
     \(AppStrings.Diagnostics.codexStatus): \(liveStatus?.result.signal.title ?? codex?.signal.title ?? AppStrings.Diagnostics.unknown) · \(liveStatus?.result.eventMessage ?? codex?.currentCommand ?? AppStrings.Diagnostics.none)
     \(AppStrings.Diagnostics.codexStatusReason): \(liveStatus.map { statusReason(file: $0.file, signal: $0.result.signal, age: $0.age) } ?? codex?.statusReason ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.codexStatusAge): \(liveStatus.map { "\(max(0, Int($0.age)))s" } ?? codex.map { "\(max(0, Int(Date().timeIntervalSince($0.updatedAt))))s" } ?? AppStrings.Diagnostics.unknown)
+    Claude 监控: \(settings.claudeMonitoringEnabled)
+    Claude 状态: \(claude?.signal.title ?? AppStrings.Diagnostics.unknown) · \(claude?.currentCommand ?? AppStrings.Diagnostics.none)
+    Claude 状态来源: \(claude?.statusReason ?? AppStrings.Diagnostics.unknown)
+    Claude 状态时效: \(agentStatusAgeSummary(claude))
+    Claude Hook: \(claudeHook.hookInstalled ? "已安装" : "未安装")
+    Claude Hook 脚本: \(claudeHook.hookScriptExecutable ? "可执行" : "不可执行") · \(HookManager.hookScriptURL.path)
+    Claude Hook 日志: \(claudeHook.logWritable ? "可写" : "不可写") · \(HookManager.claudeHookLogURL.path)
+    Claude 最近事件: \(claudeHook.latestEventAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+    Claude 工具调用: \(toolStatsSummary(claude?.toolStats ?? ToolStats()))
     \(AppStrings.Diagnostics.currentSignal): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.previousSignal): \(usage.previousSignal?.title ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.lastActiveSignal): \(usage.lastActiveSignal?.title ?? AppStrings.Diagnostics.unknown)
@@ -125,7 +149,7 @@ case "diagnostics":
     \(AppStrings.Diagnostics.willCreateNewSession): \(usage.lastSessionActivityAt.map { Date().timeIntervalSince($0) <= 300 ? "No" : "Yes" } ?? "Yes")
     \(AppStrings.Diagnostics.sessionCreateReason): \(usage.sessionCreateReason ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.currentSessionStartedAt): \(usage.currentSessionStartedAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.none)
-    \(AppStrings.Diagnostics.todayActiveTime): \(String(format: "%.1fs", usage.todayActiveSeconds))
+    \(AppStrings.Diagnostics.todayActiveTime): \(String(format: "%.1fs", domain.today.activeSeconds)) (state=\(String(format: "%.1fs", usage.todayActiveSeconds)), journal=\(String(format: "%.1fs", journalActiveSeconds)))
     \(AppStrings.Diagnostics.todaySessions): \(usage.todaySessionCount)
     \(AppStrings.Diagnostics.lastActiveIncrement): \(String(format: "%.1fs", usage.lastActiveIncrementSeconds))
     \(AppStrings.Diagnostics.todayTokens): \(usage.todayTokens.map(String.init) ?? AppStrings.Diagnostics.unknown)
@@ -137,7 +161,7 @@ case "diagnostics":
     \(AppStrings.Diagnostics.costSource): \(usage.costDataSource ?? costSource)
     \(AppStrings.Diagnostics.quotaSource): \(usage.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 Token 临时参考")
     \(AppStrings.Diagnostics.topModels): \(topModels)
-    \(AppStrings.Diagnostics.toolStats): 终端 \(liveToolStats.terminalCommands), 文件 \(liveToolStats.fileChanges), write_stdin \(liveToolStats.writeStdin), 其他 \(liveToolStats.other), 总计 \(liveToolStats.total)
+    \(AppStrings.Diagnostics.toolStats): \(toolStatsSummary(liveToolStats))
     \(AppStrings.Diagnostics.quota5hRemaining): \(usage.quota5hRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.quota5hReset): \(usage.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.weekQuotaRemaining): \(usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
@@ -152,6 +176,21 @@ case "diagnostics":
     \(AppStrings.Diagnostics.usageCache): \(paths.usageCache.path)
     \(AppStrings.Diagnostics.codexSessions): \(root.path)
     """)
+case "export-journal":
+    let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
+    let usageCache = JSONFileStore<UsageCache>(url: paths.usageCache).load(default: UsageCache())
+    let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
+    let days = parsedDays(from: Array(arguments.dropFirst())) ?? 1
+    let scan = CodexUsageScanner.scanUsage(
+        root: root,
+        days: 30,
+        options: CodexUsageScanner.Options(
+            estimateInternalModelCost: settings.estimateCodexInternalCost,
+            internalCostPerMillionTokens: settings.codexInternalCostPerMillionTokens
+        ),
+        cache: usageCache
+    )
+    print(exportJournalMarkdown(entries: scan.journalEntries, models: scan.models, days: max(1, days)))
 case "doctor":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
@@ -215,11 +254,7 @@ case "diagnose-codex":
         let lines = Array(text.split(separator: "\n").suffix(10_000)).map(String.init)
         let result = CodexLogParser.parseRecentLines(lines)
         print("Recent tool stats:")
-        print("- terminal commands: \(result.toolStats.terminalCommands)")
-        print("- file changes: \(result.toolStats.fileChanges)")
-        print("- write_stdin: \(result.toolStats.writeStdin)")
-        print("- other: \(result.toolStats.other)")
-        print("- total: \(result.toolStats.total)")
+        printToolStats(result.toolStats)
     }
 case "diagnose-quota":
     do {
@@ -294,13 +329,16 @@ case "scan-usage":
 
 	    Commands:
 	      diagnose-codex        Print observed Codex payload.type values
+	      diagnose-claude-hook  Diagnose Claude Code Hook integration
 	      diagnose-quota        Fetch Codex WHAM quota from local auth
 	      diagnose-quota-raw    Print redacted WHAM window parse details
 	      diagnostics           输出本地状态、来源、用量和额度摘要
 	      doctor                Run a quick health check for sessions, usage, status, and UI settings
+	      export-journal        Export Codex Journal as Markdown, supports --days N
 	      install-claude-hook   Install Claude Code Hook for status monitoring
 	      scan-usage            Scan Codex sessions and print daily/model usage
 	      status                Print current AgentPulse state
+	      test-claude-hook      Append a local Claude Hook test event
 	      uninstall-claude-hook Remove AgentPulse Claude Code Hook
 	      reset-window          Reset saved floating window position
 	      reset-usage-cache     Clear cached usage scan results
@@ -314,6 +352,107 @@ private func todayKey() -> String {
     return formatter.string(from: Date())
 }
 
+private func parsedDays(from args: [String]) -> Int? {
+    guard let index = args.firstIndex(of: "--days"),
+          args.indices.contains(args.index(after: index)) else {
+        return nil
+    }
+    return Int(args[args.index(after: index)])
+}
+
+private func exportJournalMarkdown(
+    entries: [UsageSnapshot.JournalEntry],
+    models: [UsageSnapshot.ModelTokenUsage],
+    days: Int
+) -> String {
+    let calendar = Calendar(identifier: .gregorian)
+    let cutoff = calendar.date(byAdding: .day, value: -(max(1, days) - 1), to: calendar.startOfDay(for: Date())) ?? Date()
+    let filtered = entries
+        .filter { $0.startedAt >= cutoff }
+        .sorted { $0.startedAt < $1.startedAt }
+    let titleDate = todayKey()
+    let topModel = models
+        .filter { $0.tokens > 0 }
+        .sorted {
+            if $0.tokens == $1.tokens { return $0.model < $1.model }
+            return $0.tokens > $1.tokens
+        }
+        .first?.model ?? AppStrings.Diagnostics.unknown
+
+    var lines: [String] = [
+        "# AgentPulse Journal - \(titleDate)",
+        "",
+        "Exported: \(quotaDateFormatter.string(from: Date()))",
+        "Range: Last \(max(1, days)) day\(days == 1 ? "" : "s")",
+        ""
+    ]
+
+    guard !filtered.isEmpty else {
+        lines.append("No journal entries found.")
+        return lines.joined(separator: "\n")
+    }
+
+    var currentDay = ""
+    for entry in filtered {
+        let day = dayKey(entry.startedAt)
+        if day != currentDay {
+            currentDay = day
+            lines.append("## \(day)")
+            lines.append("")
+        }
+        lines.append("### \(timeOnly(entry.startedAt)) - \(timeOnly(entry.endedAt))")
+        lines.append("Duration: \(markdownDuration(entry.durationSeconds))")
+        lines.append("Tokens: \(markdownTokens(entry.tokens))")
+        lines.append("Cost: \(money(entry.cost))")
+        lines.append("Model: \(topModel)")
+        lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
+        lines.append("")
+    }
+    return lines.joined(separator: "\n")
+}
+
+private func dayKey(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: date)
+}
+
+private func timeOnly(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.timeStyle = .short
+    formatter.dateStyle = .none
+    return formatter.string(from: date)
+}
+
+private func markdownDuration(_ seconds: TimeInterval) -> String {
+    let total = max(0, Int(seconds.rounded()))
+    let minutes = total / 60
+    let remainder = total % 60
+    if minutes > 0 {
+        return remainder > 0 ? "\(minutes)m \(remainder)s" : "\(minutes)m"
+    }
+    return "\(remainder)s"
+}
+
+private func markdownTokens(_ value: Int) -> String {
+    let number = Double(value)
+    if abs(number) >= 100_000_000 {
+        return "\(trimmed(number / 100_000_000))亿"
+    }
+    if abs(number) >= 10_000 {
+        return "\(trimmed(number / 10_000))万"
+    }
+    return "\(value)"
+}
+
+private func trimmed(_ value: Double) -> String {
+    let text = String(format: "%.2f", value)
+    return text
+        .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+}
+
 private func money(_ value: Decimal?) -> String {
     guard let value else { return "待确认" }
     return moneyFormatter.string(from: value as NSDecimalNumber) ?? "$0.00"
@@ -321,6 +460,44 @@ private func money(_ value: Decimal?) -> String {
 
 private func check(_ passed: Bool, _ title: String, _ detail: String) -> String {
     "\(passed ? "OK" : "WARN")  \(title): \(detail.isEmpty ? "无数据" : detail)"
+}
+
+private func printClaudeHookDiagnostics() {
+    let status = HookManager.diagnoseClaudeHook()
+    print("Claude Hook diagnostics:")
+    print(check(status.settingsExists, "Claude settings", HookManager.claudeSettingsURL.path))
+    print(check(status.settingsReadable, "settings readable", status.settingsReadable ? "可读取" : "不可读取"))
+    print(check(status.hookInstalled, "AgentPulse Hook installed", status.hookInstalled ? "已安装" : "未安装"))
+    print(check(status.hookScriptExists, "Hook script", HookManager.hookScriptURL.path))
+    print(check(status.hookScriptExecutable, "Hook executable", status.hookScriptExecutable ? "可执行" : "不可执行"))
+    print(check(status.logExists, "Hook log", HookManager.claudeHookLogURL.path))
+    print(check(status.logWritable, "Hook log writable", status.logWritable ? "可写" : "不可写"))
+    if let latest = status.latestEventLine {
+        print("Latest event: \(latest)")
+    } else {
+        print("Latest event: none")
+    }
+    print("Latest event at: \(status.latestEventAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)")
+}
+
+private func printToolStats(_ stats: ToolStats) {
+    print("- Bash: \(stats.terminalCommands)")
+    print("- Read: \(stats.readOperations)")
+    print("- Edit: \(stats.fileChanges)")
+    print("- Write: \(stats.writeStdin)")
+    print("- Search: \(stats.searchOperations)")
+    print("- Web: \(stats.webRequests)")
+    print("- Other: \(stats.other)")
+    print("- Total: \(stats.total)")
+}
+
+private func toolStatsSummary(_ stats: ToolStats) -> String {
+    "Bash \(stats.terminalCommands), Read \(stats.readOperations), Edit \(stats.fileChanges), Write \(stats.writeStdin), Search \(stats.searchOperations), Web \(stats.webRequests), Other \(stats.other), Total \(stats.total)"
+}
+
+private func agentStatusAgeSummary(_ agent: AgentSnapshot?) -> String {
+    guard let agent else { return AppStrings.Diagnostics.unknown }
+    return "\(max(0, Int(Date().timeIntervalSince(agent.updatedAt))))s"
 }
 
 private func liveCodexStatus(in root: URL, settings: AgentPulseSettings) -> (file: URL, result: CodexParseResult, age: TimeInterval)? {

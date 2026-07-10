@@ -3,6 +3,18 @@ import Foundation
 public enum HookManager {
     private static let marker = "AgentPulse Claude Hook"
 
+    public struct ClaudeHookStatus: Sendable {
+        public var settingsExists: Bool
+        public var settingsReadable: Bool
+        public var hookInstalled: Bool
+        public var hookScriptExists: Bool
+        public var hookScriptExecutable: Bool
+        public var logExists: Bool
+        public var logWritable: Bool
+        public var latestEventLine: String?
+        public var latestEventAt: Date?
+    }
+
     public static var claudeSettingsURL: URL {
         URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/settings.json")
     }
@@ -17,11 +29,66 @@ public enum HookManager {
 
     public static func isClaudeHookInstalled() -> Bool {
         guard let text = try? String(contentsOf: claudeSettingsURL, encoding: .utf8) else { return false }
-        return text.contains(marker)
+        return text.contains(marker) && FileManager.default.isExecutableFile(atPath: hookScriptURL.path)
+    }
+
+    public static func diagnoseClaudeHook() -> ClaudeHookStatus {
+        let fileManager = FileManager.default
+        let settingsExists = fileManager.fileExists(atPath: claudeSettingsURL.path)
+        let settingsReadable = fileManager.isReadableFile(atPath: claudeSettingsURL.path)
+        let hookScriptExists = fileManager.fileExists(atPath: hookScriptURL.path)
+        let hookScriptExecutable = fileManager.isExecutableFile(atPath: hookScriptURL.path)
+        let logExists = fileManager.fileExists(atPath: claudeHookLogURL.path)
+        let logWritable = fileManager.isWritableFile(atPath: claudeHookLogURL.path)
+            || fileManager.isWritableFile(atPath: claudeHookLogURL.deletingLastPathComponent().path)
+        let latestLine = latestNonEmptyLine(in: claudeHookLogURL)
+        return ClaudeHookStatus(
+            settingsExists: settingsExists,
+            settingsReadable: settingsReadable,
+            hookInstalled: isClaudeHookInstalled(),
+            hookScriptExists: hookScriptExists,
+            hookScriptExecutable: hookScriptExecutable,
+            logExists: logExists,
+            logWritable: logWritable,
+            latestEventLine: latestLine,
+            latestEventAt: latestLine.flatMap { ClaudeHookEventParser.parse($0)?.date }
+        )
+    }
+
+    public static func writeTestClaudeHookEvent() throws {
+        try FileManager.default.createDirectory(at: claudeHookLogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let event: [String: Any] = [
+            "hook_event_name": "UserPromptSubmit",
+            "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "source": "AgentPulse Test Event"
+        ]
+        let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+        guard let line = String(data: data, encoding: .utf8) else { return }
+        if !FileManager.default.fileExists(atPath: claudeHookLogURL.path) {
+            FileManager.default.createFile(atPath: claudeHookLogURL.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: claudeHookLogURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((line + "\n").utf8))
+        try handle.close()
+    }
+
+    public static func recentClaudeHookEvents(limit: Int = 5) -> [ClaudeHookEvent] {
+        guard limit > 0,
+              let text = try? String(contentsOf: claudeHookLogURL, encoding: .utf8) else {
+            return []
+        }
+        return text.split(separator: "\n", omittingEmptySubsequences: true)
+            .reversed()
+            .lazy
+            .compactMap { ClaudeHookEventParser.parse(String($0)) }
+            .prefix(limit)
+            .map { $0 }
     }
 
     public static func installClaudeHook() throws {
         try FileManager.default.createDirectory(at: hookScriptURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: claudeHookLogURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let script = """
         #!/bin/zsh
         # \(marker)
@@ -67,9 +134,6 @@ public enum HookManager {
 
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: settingsURL, options: [.atomic])
-        if let snippet = Self.settingsSnippet(events: events.map(\.name), hooks: hooks) {
-            print(snippet)
-        }
     }
 
     private static func hookGroup(command: String, matcher: String?) -> [String: Any] {
@@ -91,19 +155,9 @@ public enum HookManager {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private static func settingsSnippet(events: [String], hooks: [String: Any]) -> String? {
-        var snippet: [String: Any] = ["_agentpulse": marker]
-        var hookSnippet: [String: Any] = [:]
-        for event in events {
-            if let entries = hooks[event] {
-                hookSnippet[event] = entries
-            }
-        }
-        snippet["hooks"] = hookSnippet
-        guard let data = try? JSONSerialization.data(withJSONObject: snippet, options: [.prettyPrinted, .sortedKeys]) else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
+    private static func latestNonEmptyLine(in url: URL) -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return text.split(separator: "\n", omittingEmptySubsequences: true).last.map(String.init)
     }
 
     public static func uninstallClaudeHook() throws {

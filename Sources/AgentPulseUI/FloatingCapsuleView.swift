@@ -131,8 +131,8 @@ public struct FloatingCapsuleView: View {
                         .lineLimit(1)
                 }
             } else {
-                metricRow("Token", "暂未提供", title: "Claude Usage")
-                metricRow("Cost", "暂未提供")
+                metricRow("监测方式", "Claude Code Hook", title: "Claude 状态")
+                metricRow("Token / Cost", "暂未提供")
             }
             DividerLine(settings: settings)
             Text("工具调用 · \(agent.toolStats.total) 次")
@@ -170,13 +170,31 @@ public struct FloatingCapsuleView: View {
             Circle()
                 .fill(item.signal.pulseColor.opacity(0.85))
                 .frame(width: 7, height: 7)
-            Text(item.kind.displayName)
-                .font(.system(size: 11, weight: .medium))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.kind.displayName)
+                    .font(.system(size: 11, weight: .medium))
+                Text(agentRecentEventText(item))
+                    .font(.system(size: 9))
+                    .foregroundStyle(settings.tertiaryText(system: colorScheme))
+                    .lineLimit(1)
+            }
             Spacer()
             Text(item.signal.title)
                 .font(.system(size: 11))
                 .foregroundStyle(settings.secondaryText(system: colorScheme))
         }
+    }
+
+    private func agentRecentEventText(_ item: AgentSnapshot) -> String {
+        let date = item.recentEvents.first?.date ?? item.updatedAt
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 60 {
+            return "最近事件 \(seconds) 秒前"
+        }
+        if seconds < 3600 {
+            return "最近事件 \(seconds / 60) 分钟前"
+        }
+        return "最近事件 \(date.formatted(date: .omitted, time: .shortened))"
     }
 
     private func metricRow(_ label: String, _ value: String, title: String? = nil) -> some View {
@@ -328,7 +346,9 @@ public struct FloatingCapsuleView: View {
     }
 
     private func openAgent() {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
+        if agent.kind == .claude {
+            NSWorkspace.shared.open(HookManager.claudeHookLogURL.deletingLastPathComponent())
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
     }

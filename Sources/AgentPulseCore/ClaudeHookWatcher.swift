@@ -14,6 +14,23 @@ public struct ClaudeHookEvent: Sendable {
         self.date = date
         self.toolName = toolName
     }
+
+    public var displayTitle: String {
+        switch type {
+        case "UserPromptSubmit":
+            return "提交提示词"
+        case "PreToolUse":
+            return toolName.map { "准备调用工具 · \($0)" } ?? "准备调用工具"
+        case "PostToolUse":
+            return toolName.map { "工具调用完成 · \($0)" } ?? "工具调用完成"
+        case "Notification":
+            return "需要关注"
+        case "Stop":
+            return "响应完成"
+        default:
+            return "Claude 事件 · \(type)"
+        }
+    }
 }
 
 public struct ClaudeHookDiagnostics: Codable, Equatable, Sendable {
@@ -44,12 +61,10 @@ public enum ClaudeHookEventParser {
             let data = line.data(using: .utf8),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            print("AgentPulse Claude Hook: ignored non-JSON event")
             return nil
         }
 
         guard let eventType = eventType(in: object) else {
-            print("AgentPulse Claude Hook: ignored event without type")
             return nil
         }
 
@@ -58,18 +73,17 @@ public enum ClaudeHookEventParser {
 
         switch eventType {
         case "UserPromptSubmit":
-            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude Thinking", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 正在分析提示词", date: date, toolName: toolName)
         case "PreToolUse":
-            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude Working · \($0)" } ?? "Claude Working", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude 准备调用工具 · \($0)" } ?? "Claude 准备调用工具", date: date, toolName: toolName)
         case "PostToolUse":
-            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude Working · \($0)" } ?? "Claude Working", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude 工具调用完成 · \($0)" } ?? "Claude 工具调用完成", date: date, toolName: toolName)
         case "Notification":
-            return ClaudeHookEvent(type: eventType, signal: .attention, message: "Claude Attention", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .attention, message: "Claude 需要关注", date: date, toolName: toolName)
         case "Stop":
-            return ClaudeHookEvent(type: eventType, signal: .done, message: "Claude Done", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .done, message: "Claude 响应完成", date: date, toolName: toolName)
         default:
-            print("AgentPulse Claude Hook: unknown event \(eventType)")
-            return nil
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 事件 · \(eventType)", date: date, toolName: toolName)
         }
     }
 
@@ -112,6 +126,7 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
     private var fileDescriptor: CInt = -1
     private var source: DispatchSourceFileSystemObject?
     private var offset: UInt64 = 0
+    private let startupReplayWindow: TimeInterval = 180
 
     public init(
         logURL: URL,
@@ -147,6 +162,7 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }
+        replayLatestRecentEvent()
         offset = fileSize(logURL)
         fileDescriptor = open(logURL.path, O_EVTONLY)
         guard fileDescriptor >= 0 else { return }
@@ -203,5 +219,26 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
     private func fileSize(_ url: URL) -> UInt64 {
         let values = try? url.resourceValues(forKeys: [.fileSizeKey])
         return UInt64(values?.fileSize ?? 0)
+    }
+
+    private func replayLatestRecentEvent() {
+        guard let text = try? String(contentsOf: logURL, encoding: .utf8),
+              let event = text.split(separator: "\n", omittingEmptySubsequences: true)
+                .reversed()
+                .lazy
+                .compactMap({ ClaudeHookEventParser.parse(String($0)) })
+                .first,
+              Date().timeIntervalSince(event.date) <= startupReplayWindow else {
+            return
+        }
+        Task { @MainActor in
+            onDiagnostics(ClaudeHookDiagnostics(
+                lastEventType: event.type,
+                lastEventAt: event.date,
+                lastStateChangeAt: event.date,
+                lastHookUpdateAt: event.date
+            ))
+            onEvent(event)
+        }
     }
 }

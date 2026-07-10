@@ -164,7 +164,7 @@ public final class AgentPulseStore: ObservableObject {
     public func healthChecks() -> [AgentPulseHealthCheck] {
         let codex = agents.first(where: { $0.kind == .codex })
         let usage = codex?.usage
-        return [
+        var checks = [
             healthCheck(FileManager.default.fileExists(atPath: codexSessionRoot.path), "Codex session 目录", codexSessionRoot.path),
             healthCheck(usage?.latestSessionPath != nil, "最近 Codex session", usage?.latestSessionPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "未发现"),
             healthCheck((usage?.thirtyDayTokens ?? 0) > 0, "Token 扫描", usage?.thirtyDayTokens.map { "\($0) tokens" } ?? "无数据"),
@@ -175,6 +175,14 @@ public final class AgentPulseStore: ObservableObject {
             healthCheck(settings.showFloatingWindow, "悬浮胶囊", settings.showFloatingWindow ? "已开启" : "已关闭"),
             healthCheck(settings.codexMonitoringEnabled, "Codex 监控", settings.codexMonitoringEnabled ? "已开启" : "已关闭")
         ]
+        if settings.claudeMonitoringEnabled {
+            let claude = agents.first(where: { $0.kind == .claude })
+            let hook = HookManager.diagnoseClaudeHook()
+            checks.append(healthCheck(hook.hookInstalled, "Claude Hook", hook.hookInstalled ? "已安装" : "未安装"))
+            checks.append(healthCheck(hook.logWritable, "Claude Hook 日志", hook.logWritable ? "可写" : "不可写"))
+            checks.append(healthCheck(claude != nil, "Claude 状态", claude.map { "\($0.signal.title) · \($0.currentCommand ?? "无消息")" } ?? "无状态"))
+        }
+        return checks
     }
 
     public func recentCodexSessionSummaries(limit: Int = 5) -> [String] {
@@ -218,6 +226,8 @@ public final class AgentPulseStore: ObservableObject {
 
     public func diagnosticSummary() -> String {
         let codex = agents.first(where: { $0.kind == .codex })
+        let claude = agents.first(where: { $0.kind == .claude })
+        let claudeHook = HookManager.diagnoseClaudeHook()
         let usage = codex?.usage
         return """
         \(AppStrings.Diagnostics.title)
@@ -227,6 +237,15 @@ public final class AgentPulseStore: ObservableObject {
         \(AppStrings.Diagnostics.codexStatus): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown) · \(codex?.currentCommand ?? AppStrings.Diagnostics.none)
         \(AppStrings.Diagnostics.codexStatusReason): \(codex?.statusReason ?? AppStrings.Diagnostics.unknown)
         \(AppStrings.Diagnostics.codexStatusAge): \(codexStatusAgeSummary(codex))
+        Claude 监控: \(settings.claudeMonitoringEnabled)
+        Claude 状态: \(claude?.signal.title ?? AppStrings.Diagnostics.unknown) · \(claude?.currentCommand ?? AppStrings.Diagnostics.none)
+        Claude 状态来源: \(claude?.statusReason ?? AppStrings.Diagnostics.unknown)
+        Claude 状态时效: \(agentStatusAgeSummary(claude))
+        Claude Hook: \(claudeHook.hookInstalled ? "已安装" : "未安装")
+        Claude Hook 脚本: \(claudeHook.hookScriptExecutable ? "可执行" : "不可执行") · \(HookManager.hookScriptURL.path)
+        Claude Hook 日志: \(claudeHook.logWritable ? "可写" : "不可写") · \(HookManager.claudeHookLogURL.path)
+        Claude 最近事件: \(claudeHook.latestEventAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
+        Claude 工具调用: \(toolStatsSummary(claude?.toolStats ?? ToolStats()))
         \(AppStrings.Diagnostics.currentSignal): \(codex?.signal.title ?? AppStrings.Diagnostics.unknown)
         \(AppStrings.Diagnostics.previousSignal): \(signalTitle(usage?.previousSignal))
         \(AppStrings.Diagnostics.lastActiveSignal): \(signalTitle(usage?.lastActiveSignal))
@@ -430,7 +449,7 @@ public final class AgentPulseStore: ObservableObject {
         var snapshot = agents.first(where: { $0.kind == .claude }) ?? AgentSnapshot(kind: .claude)
         snapshot.hookInstalled = HookManager.isClaudeHookInstalled()
         if !snapshot.hookInstalled {
-            snapshot.signal = .attention
+            snapshot.signal = .idle
             snapshot.currentCommand = "Claude Hook 未安装"
             snapshot.statusReason = "需要在 Agent 页安装 Claude Code Hook"
             snapshot.updatedAt = Date()
@@ -621,8 +640,12 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private func codexStatusAgeSummary(_ codex: AgentSnapshot?) -> String {
-        guard let codex else { return AppStrings.Diagnostics.unknown }
-        let seconds = max(0, Int(Date().timeIntervalSince(codex.updatedAt)))
+        agentStatusAgeSummary(codex)
+    }
+
+    private func agentStatusAgeSummary(_ agent: AgentSnapshot?) -> String {
+        guard let agent else { return AppStrings.Diagnostics.unknown }
+        let seconds = max(0, Int(Date().timeIntervalSince(agent.updatedAt)))
         return "\(seconds)s"
     }
 

@@ -206,6 +206,7 @@ private struct AgentsPage: View {
     @ObservedObject var store: AgentPulseStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var message: String?
+    @State private var recentClaudeHookEvents: [ClaudeHookEvent] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -225,7 +226,8 @@ private struct AgentsPage: View {
                 enabled: binding(\.claudeMonitoringEnabled),
                 installed: claudeHookInstalled,
                 actions: {
-                    Button("安装 Hook") { installClaudeHook() }
+                    Button(claudeHookInstalled ? "重装 Hook" : "安装 Hook") { installClaudeHook() }
+                    Button("测试 Hook") { testClaudeHook() }
                     Button("卸载 Hook") { uninstallClaudeHook() }
                     Button("打开 Hook 日志") { NSWorkspace.shared.open(store.claudeHookLogURL.deletingLastPathComponent()) }
                 }
@@ -235,16 +237,47 @@ private struct AgentsPage: View {
                 .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if !claudeHookInstalled, claudeHookStatus.settingsExists {
+                Text("检测到 Claude 配置，但 AgentPulse Hook 脚本不可用；点击安装 Hook 可修复。")
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+            }
             if let message {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(message.contains("失败") ? store.settings.errorText(system: colorScheme) : store.settings.secondaryText(system: colorScheme))
             }
+            if !recentClaudeHookEvents.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("最近 Claude Hook 事件")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                    ForEach(recentClaudeHookEvents.prefix(3), id: \.date) { event in
+                        HStack {
+                            Text(event.displayTitle)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .help(event.type)
+                            Spacer()
+                            Text(event.date.formatted(date: .omitted, time: .shortened))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(store.settings.tertiaryText(system: colorScheme))
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            refreshRecentClaudeHookEvents()
         }
     }
 
     private var claudeHookInstalled: Bool {
-        store.agents.first(where: { $0.kind == .claude })?.hookInstalled ?? HookManager.isClaudeHookInstalled()
+        claudeHookStatus.hookInstalled
+    }
+
+    private var claudeHookStatus: HookManager.ClaudeHookStatus {
+        HookManager.diagnoseClaudeHook()
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<AgentPulseSettings, Value>) -> Binding<Value> {
@@ -265,6 +298,7 @@ private struct AgentsPage: View {
         do {
             try store.installClaudeHook()
             message = "Claude Hook 已安装并启用监控。"
+            refreshRecentClaudeHookEvents()
         } catch {
             message = "安装 Claude Hook 失败：\(error.localizedDescription)"
         }
@@ -274,9 +308,25 @@ private struct AgentsPage: View {
         do {
             try store.uninstallClaudeHook()
             message = "Claude Hook 已卸载。"
+            refreshRecentClaudeHookEvents()
         } catch {
             message = "卸载 Claude Hook 失败：\(error.localizedDescription)"
         }
+    }
+
+    private func testClaudeHook() {
+        do {
+            try HookManager.writeTestClaudeHookEvent()
+            message = "已写入 Claude Hook 测试事件。"
+            refreshRecentClaudeHookEvents()
+            store.refresh()
+        } catch {
+            message = "写入 Claude Hook 测试事件失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func refreshRecentClaudeHookEvents() {
+        recentClaudeHookEvents = HookManager.recentClaudeHookEvents(limit: 3)
     }
 }
 
@@ -960,7 +1010,7 @@ private struct AboutPage: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.2"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.3"
     }
 
     private func checkForUpdates() {
@@ -974,9 +1024,16 @@ private struct AboutPage: View {
                     updateStatus = result.message
                 }
                 if result.hasUpdate {
-                    try await AgentPulseUpdateChecker.downloadAndOpenInstaller(from: result.release)
+                    let downloadedAssetName = try await AgentPulseUpdateChecker.downloadAndOpenInstaller(from: result.release)
                     await MainActor.run {
-                        updateStatus = "已下载 \(result.release.displayVersion) 并打开安装包。"
+                        updateStatus = """
+                        已下载并打开安装包。
+                        当前版本：\(currentVersion)
+                        最新版本：\(result.release.displayVersion)
+                        DMG：\(downloadedAssetName)
+                        Release 页面：\(result.release.htmlURL.absoluteString)
+                        请关闭 AgentPulse 后，将 DMG 中的新版本拖拽替换到 Applications。
+                        """
                     }
                 }
             } catch AgentPulseUpdateChecker.UpdateError.noDMGAsset(let url) {
@@ -1094,13 +1151,25 @@ private enum AgentPulseUpdateChecker {
             throw UpdateError.invalidReleaseData
         }
         let hasUpdate = compare(release.displayVersion, currentVersion) == .orderedDescending
+        let assetName = release.dmgAsset?.name ?? "未找到 DMG"
         let message = hasUpdate
-            ? "发现新版本 \(release.displayVersion)，正在准备下载…"
-            : "当前已是最新版本 \(currentVersion)。"
+            ? """
+            发现新版本，正在准备下载…
+            当前版本：\(currentVersion)
+            最新版本：\(release.displayVersion)
+            DMG：\(assetName)
+            Release 页面：\(release.htmlURL.absoluteString)
+            """
+            : """
+            当前已是最新版本。
+            当前版本：\(currentVersion)
+            最新版本：\(release.displayVersion)
+            Release 页面：\(release.htmlURL.absoluteString)
+            """
         return Result(hasUpdate: hasUpdate, message: message, release: release)
     }
 
-    static func downloadAndOpenInstaller(from release: GitHubRelease) async throws {
+    static func downloadAndOpenInstaller(from release: GitHubRelease) async throws -> String {
         guard let asset = release.dmgAsset else {
             throw UpdateError.noDMGAsset(release.htmlURL)
         }
@@ -1134,6 +1203,7 @@ private enum AgentPulseUpdateChecker {
         await MainActor.run {
             _ = NSWorkspace.shared.open(destination)
         }
+        return asset.name
     }
 
     static func openReleasesPage() {
@@ -1397,15 +1467,29 @@ private struct AgentJournalCard: View {
     @State private var expandedYesterday = false
     @State private var expandedGroups: Set<String> = []
     @State private var didInitializeExpandedGroups = false
+    @State private var exportMessage: String?
 
     var body: some View {
         GlassPanel(title: AppStrings.Sections.agentJournal) {
-            Picker("Journal 范围", selection: $range) {
-                ForEach(JournalRange.allCases) { item in
-                    Text(item.rawValue).tag(item)
+            HStack {
+                Picker("Journal 范围", selection: $range) {
+                    ForEach(JournalRange.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
                 }
+                .pickerStyle(.segmented)
+                Spacer()
+                Button("导出") {
+                    exportJournal()
+                }
+                .disabled(selectedEntries.isEmpty)
             }
-            .pickerStyle(.segmented)
+
+            if let exportMessage {
+                Text(exportMessage)
+                    .font(.caption)
+                    .foregroundStyle(exportMessage.contains("失败") ? settings.errorText(system: colorScheme) : settings.secondaryText(system: colorScheme))
+            }
 
             switch range {
             case .today:
@@ -1520,6 +1604,75 @@ private struct AgentJournalCard: View {
     }
 
     private var collapsedLimit: Int { 5 }
+
+    private var selectedEntries: [UsageSnapshot.JournalEntry] {
+        switch range {
+        case .today:
+            return journal.todayEntries
+        case .yesterday:
+            return journal.yesterdayEntries
+        case .last7Days:
+            return journal.last7DayGroups.flatMap(\.entries)
+        }
+    }
+
+    private func exportJournal() {
+        let entries = selectedEntries.sorted { $0.startedAt < $1.startedAt }
+        guard !entries.isEmpty else { return }
+        do {
+            let paths = AppStoragePaths()
+            try FileManager.default.createDirectory(at: paths.logs, withIntermediateDirectories: true)
+            let timestamp = exportTimestamp()
+            let fileName = "journal-\(rangeFileName)-\(timestamp).md"
+            let url = paths.logs.appendingPathComponent(fileName)
+            try journalMarkdown(entries: entries).write(to: url, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            exportMessage = "Journal 已导出"
+        } catch {
+            exportMessage = "导出失败：\(error.localizedDescription)"
+        }
+    }
+
+    private var rangeFileName: String {
+        switch range {
+        case .today: return "today"
+        case .yesterday: return "yesterday"
+        case .last7Days: return "last-7-days"
+        }
+    }
+
+    private func journalMarkdown(entries: [UsageSnapshot.JournalEntry]) -> String {
+        var lines = [
+            "# AgentPulse Journal - \(dayKey(Date()))",
+            "",
+            "Range: \(range.rawValue)",
+            "Exported: \(Date().formatted(date: .numeric, time: .standard))",
+            ""
+        ]
+        var currentDay = ""
+        for entry in entries {
+            let day = dayKey(entry.startedAt)
+            if day != currentDay {
+                currentDay = day
+                lines.append("## \(day)")
+                lines.append("")
+            }
+            lines.append("### \(entry.startedAt.formatted(date: .omitted, time: .shortened)) - \(entry.endedAt.formatted(date: .omitted, time: .shortened))")
+            lines.append("Duration: \(AgentPulseFormatters.duration(entry.durationSeconds))")
+            lines.append("Tokens: \(AgentPulseFormatters.tokens(entry.tokens))")
+            lines.append("Cost: \(AgentPulseFormatters.money(entry.cost, privacy: privacy))")
+            lines.append("Model: \(modelName ?? "未知")")
+            lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func exportTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
+    }
 
     private func dayTitle(_ day: String) -> String {
         if day == dayKey(Date()) {
