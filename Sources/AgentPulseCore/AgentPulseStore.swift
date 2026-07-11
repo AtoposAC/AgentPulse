@@ -6,6 +6,7 @@ public final class AgentPulseStore: ObservableObject {
     @Published public var settings: AgentPulseSettings
     @Published public private(set) var isRefreshingCodexQuota = false
     @Published public private(set) var isRefreshingUsage = false
+    @Published public private(set) var isRefreshingCodexState = false
 
     private let paths: AppStoragePaths
     private let stateStore: JSONFileStore<[AgentSnapshot]>
@@ -37,7 +38,13 @@ public final class AgentPulseStore: ObservableObject {
         self.usageCache = usageCacheStore.load(default: UsageCache())
         self.agents = stateStore.load(default: [
             AgentSnapshot(kind: .codex, signal: .idle, hookInstalled: false)
-        ]).filter { $0.kind == .codex || $0.kind == .claude }
+        ])
+        .filter { $0.kind == .codex || $0.kind == .claude }
+        .map(Self.normalizedRecentEvents)
+        if usageCache.schemaVersion == UsageCache.currentSchemaVersion,
+           !usageCache.files.isEmpty {
+            self.lastUsageScanAt = Date()
+        }
     }
 
     public func start() {
@@ -288,6 +295,7 @@ public final class AgentPulseStore: ObservableObject {
         let sessionRoot = codexSessionRoot
         guard !codexRefreshInFlight else { return }
         codexRefreshInFlight = true
+        isRefreshingCodexState = true
         let existing = agents.first(where: { $0.kind == .codex }) ?? AgentSnapshot(kind: .codex)
         let settings = settings
         let usageCache = usageCache
@@ -310,9 +318,16 @@ public final class AgentPulseStore: ObservableObject {
 
     private func applyCodexRefreshResult(_ refresh: CodexRefreshWorker.Result) {
         codexRefreshInFlight = false
+        isRefreshingCodexState = false
         isRefreshingUsage = false
         guard var snapshot = refresh.snapshot else {
-            upsert(AgentSnapshot(kind: .codex, signal: .idle, currentCommand: "未发现 Codex 会话日志", updatedAt: Date()))
+            var existing = agents.first(where: { $0.kind == .codex }) ?? AgentSnapshot(kind: .codex)
+            existing.signal = .idle
+            existing.currentCommand = "未发现 Codex 会话日志"
+            existing.statusReason = "保留上次成功读取的用量数据"
+            existing.updatedAt = Date()
+            upsert(existing)
+            persist()
             return
         }
         let existingCodex = agents.first(where: { $0.kind == .codex })
@@ -475,7 +490,7 @@ public final class AgentPulseStore: ObservableObject {
         snapshot.statusReason = event.toolName.map { "Claude Hook · \(event.type) · \($0)" } ?? "Claude Hook · \(event.type)"
         snapshot.updatedAt = event.date
         snapshot.hookInstalled = HookManager.isClaudeHookInstalled()
-        snapshot.recentEvents = ([AgentEvent(kind: .claude, signal: event.signal, message: event.message)] + snapshot.recentEvents).prefix(50).map { $0 }
+        snapshot.recentEvents = ([AgentEvent(date: event.date, kind: .claude, signal: event.signal, message: event.message)] + snapshot.recentEvents).prefix(50).map { $0 }
         if event.signal == .working {
             incrementClaudeToolStats(toolName: event.toolName, snapshot: &snapshot)
         }
@@ -768,7 +783,8 @@ public final class AgentPulseStore: ObservableObject {
 
     private func mergePersistedState() {
         let persisted = stateStore.load(default: [AgentSnapshot]())
-        for snapshot in persisted {
+        for persistedSnapshot in persisted {
+            let snapshot = Self.normalizedRecentEvents(persistedSnapshot)
             guard snapshot.kind == .codex || snapshot.kind == .claude else { continue }
             if snapshot.updatedAt > (agents.first(where: { $0.kind == snapshot.kind })?.updatedAt ?? .distantPast) {
                 upsert(snapshot)
@@ -780,12 +796,26 @@ public final class AgentPulseStore: ObservableObject {
         agents.removeAll { $0.kind == kind }
     }
 
+    private static func normalizedRecentEvents(_ snapshot: AgentSnapshot) -> AgentSnapshot {
+        guard snapshot.kind == .codex else { return snapshot }
+        var normalized = snapshot
+        normalized.recentEvents = snapshot.recentEvents.reduce(into: []) { events, event in
+            if let previous = events.last,
+               previous.signal == event.signal,
+               previous.message == event.message {
+                return
+            }
+            events.append(event)
+        }
+        return normalized
+    }
+
     private func latestJSONL(in root: URL) -> URL? {
         recentJSONLs(in: root, limit: 1).first
     }
 
     private func recentJSONLs(in root: URL, limit: Int) -> [URL] {
-        candidateSessionFiles(root: root, days: 7)
+        candidateSessionFiles(root: root, days: 30)
             .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
             .sorted {
                 let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -883,20 +913,32 @@ private enum CodexRefreshWorker {
         }
 
         let parse = selected.result
+        let currentModel = candidates
+            .filter { candidate in
+                guard let model = candidate.result.modelName else { return false }
+                return !isInternalReviewModel(model)
+            }
+            .min { $0.age < $1.age }?
+            .result.modelName ?? parse.modelName
         let display = displayState(signal: parse.signal, message: parse.eventMessage, latestAge: selected.age, doneHoldSeconds: settings.doneHoldSeconds)
-        let event = AgentEvent(kind: .codex, signal: parse.signal, message: parse.eventMessage)
         var snapshot = existing
         snapshot.signal = display.signal
         snapshot.currentCommand = display.message
         snapshot.statusReason = statusReason(file: selected.file, signal: parse.signal, age: selected.age)
         snapshot.updatedAt = Date()
         snapshot.toolStats = parse.toolStats
-        snapshot.recentEvents = ([event] + snapshot.recentEvents).prefix(50).map { $0 }
+        appendCodexEventIfChanged(
+            AgentEvent(kind: .codex, signal: display.signal, message: display.message),
+            to: &snapshot
+        )
 
         var usage = snapshot.usage
         usage.tokenDataSource = "~/.codex/sessions JSONL"
         usage.costDataSource = costDataSource
-        usage.toolStats = parse.toolStats
+        usage.currentModel = currentModel ?? usage.currentModel
+        if usage.toolStats.total == 0 {
+            usage.toolStats = parse.toolStats
+        }
         usage.scannedFileCount = usageCache.files.count
         usage.latestSessionPath = selected.file.path
         usage.latestSessionModifiedAt = latestModificationDate(selected.file)
@@ -916,6 +958,7 @@ private enum CodexRefreshWorker {
             usage.scannedFileCount = scan.cache.files.count
             usage.usageScannedAt = Date()
             usage.journalEntries = scan.journalEntries
+            usage.toolStats = scan.toolStats
             if !daily.isEmpty {
                 usage.dailyTokenUsage = daily
                 usage.modelTokenUsage = scan.models
@@ -953,6 +996,19 @@ private enum CodexRefreshWorker {
             let time = modified.map { quotaDateFormatter.string(from: $0) } ?? "未知时间"
             return "\(file.lastPathComponent) · \(result.signal.title) · \(result.eventMessage) · \(time)"
         }
+    }
+
+    private static func appendCodexEventIfChanged(_ event: AgentEvent, to snapshot: inout AgentSnapshot) {
+        if let previous = snapshot.recentEvents.first,
+           previous.signal == event.signal,
+           previous.message == event.message {
+            return
+        }
+        snapshot.recentEvents = ([event] + snapshot.recentEvents).prefix(50).map { $0 }
+    }
+
+    private static func isInternalReviewModel(_ model: String) -> Bool {
+        model.lowercased().contains("auto-review")
     }
 
     private static func bestCodexCandidate(_ candidates: [(file: URL, result: CodexParseResult, age: TimeInterval)], doneHoldSeconds: Int) -> (file: URL, result: CodexParseResult, age: TimeInterval)? {
@@ -993,7 +1049,7 @@ private enum CodexRefreshWorker {
     }
 
     private static func recentJSONLs(in root: URL, limit: Int) -> [URL] {
-        candidateSessionFiles(root: root, days: 7)
+        candidateSessionFiles(root: root, days: 30)
             .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
             .sorted {
                 let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast

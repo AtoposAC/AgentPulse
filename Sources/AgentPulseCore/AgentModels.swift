@@ -81,6 +81,16 @@ public struct ToolStats: Codable, Equatable, Sendable {
         terminalCommands + readOperations + fileChanges + writeStdin + searchOperations + webRequests + other
     }
 
+    public mutating func add(_ other: ToolStats) {
+        terminalCommands += other.terminalCommands
+        readOperations += other.readOperations
+        fileChanges += other.fileChanges
+        writeStdin += other.writeStdin
+        searchOperations += other.searchOperations
+        webRequests += other.webRequests
+        self.other += other.other
+    }
+
     enum CodingKeys: String, CodingKey {
         case terminalCommands
         case readOperations
@@ -176,8 +186,9 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         public var tokens: Int
         public var cost: Decimal?
         public var sourcePath: String
+        public var model: String?
 
-        public init(id: String, startedAt: Date, endedAt: Date, tokens: Int, cost: Decimal? = nil, sourcePath: String) {
+        public init(id: String, startedAt: Date, endedAt: Date, tokens: Int, cost: Decimal? = nil, sourcePath: String, model: String? = nil) {
             self.id = id
             self.startedAt = startedAt
             self.endedAt = endedAt
@@ -185,6 +196,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
             self.tokens = tokens
             self.cost = cost
             self.sourcePath = sourcePath
+            self.model = model
         }
     }
 
@@ -197,6 +209,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
     public var monthlyBudget: Decimal?
     public var dailyTokenUsage: [DailyTokenUsage]
     public var modelTokenUsage: [ModelTokenUsage]
+    public var currentModel: String?
     public var inputTokens: Int?
     public var cachedInputTokens: Int?
     public var outputTokens: Int?
@@ -240,6 +253,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         case monthlyBudget
         case dailyTokenUsage
         case modelTokenUsage
+        case currentModel
         case inputTokens
         case cachedInputTokens
         case outputTokens
@@ -284,6 +298,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         monthlyBudget: Decimal? = nil,
         dailyTokenUsage: [DailyTokenUsage] = [],
         modelTokenUsage: [ModelTokenUsage] = [],
+        currentModel: String? = nil,
         inputTokens: Int? = nil,
         cachedInputTokens: Int? = nil,
         outputTokens: Int? = nil,
@@ -326,6 +341,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         self.monthlyBudget = monthlyBudget
         self.dailyTokenUsage = dailyTokenUsage
         self.modelTokenUsage = modelTokenUsage
+        self.currentModel = currentModel
         self.inputTokens = inputTokens
         self.cachedInputTokens = cachedInputTokens
         self.outputTokens = outputTokens
@@ -371,6 +387,7 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         monthlyBudget = try container.decodeIfPresent(Decimal.self, forKey: .monthlyBudget)
         dailyTokenUsage = try container.decodeIfPresent([DailyTokenUsage].self, forKey: .dailyTokenUsage) ?? []
         modelTokenUsage = try container.decodeIfPresent([ModelTokenUsage].self, forKey: .modelTokenUsage) ?? []
+        currentModel = try container.decodeIfPresent(String.self, forKey: .currentModel)
         inputTokens = try container.decodeIfPresent(Int.self, forKey: .inputTokens)
         cachedInputTokens = try container.decodeIfPresent(Int.self, forKey: .cachedInputTokens)
         outputTokens = try container.decodeIfPresent(Int.self, forKey: .outputTokens)

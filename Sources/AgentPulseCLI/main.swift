@@ -95,6 +95,8 @@ case "diagnostics":
         usage.cachedInputTokens = scan.models.reduce(0) { $0 + $1.cachedInputTokens }
         usage.outputTokens = scan.models.reduce(0) { $0 + $1.outputTokens }
         usage.journalEntries = scan.journalEntries
+        usage.toolStats = scan.toolStats
+        usage.currentModel = currentPrimaryModel(in: root) ?? usage.currentModel
         usage.usageScannedAt = usageScanDate
         usage.scannedFileCount = scan.cache.files.count
         usage.latestSessionPath = latestSession?.path
@@ -117,12 +119,6 @@ case "diagnostics":
     let dailySummary = usage.dailyTokenUsage.isEmpty
         ? AppStrings.Diagnostics.unknown
         : usage.dailyTokenUsage.suffix(5).map { "\($0.date)=\($0.tokens)" }.joined(separator: ", ")
-    let liveToolStats: ToolStats = {
-        guard let liveStatus else {
-            return codex?.toolStats ?? ToolStats()
-        }
-        return liveStatus.result.toolStats
-    }()
     print("""
     \(AppStrings.Diagnostics.title)
     \(AppStrings.Diagnostics.monitoringPaused): \(settings.monitoringPaused)
@@ -161,7 +157,8 @@ case "diagnostics":
     \(AppStrings.Diagnostics.costSource): \(usage.costDataSource ?? costSource)
     \(AppStrings.Diagnostics.quotaSource): \(usage.quotaDataSource ?? "等待 WHAM 刷新；失败时使用本地 Token 临时参考")
     \(AppStrings.Diagnostics.topModels): \(topModels)
-    \(AppStrings.Diagnostics.toolStats): \(toolStatsSummary(liveToolStats))
+    当前模型: \(usage.currentModel ?? AppStrings.Diagnostics.unknown)
+    \(AppStrings.Diagnostics.toolStats): \(toolStatsSummary(usage.toolStats))
     \(AppStrings.Diagnostics.quota5hRemaining): \(usage.quota5hRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.quota5hReset): \(usage.quota5hResetAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)
     \(AppStrings.Diagnostics.weekQuotaRemaining): \(usage.quotaWeekRemainingPercent.map { "\($0)%" } ?? AppStrings.Diagnostics.unknown)
@@ -190,7 +187,7 @@ case "export-journal":
         ),
         cache: usageCache
     )
-    print(exportJournalMarkdown(entries: scan.journalEntries, models: scan.models, days: max(1, days)))
+    print(exportJournalMarkdown(entries: scan.journalEntries, days: max(1, days)))
 case "doctor":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
@@ -313,6 +310,8 @@ case "scan-usage":
             print("  - \(item.model): \(item.tokens) tokens · \(percent)% · \(money(item.cost))")
         }
     }
+    print("- tool calls:")
+    printToolStats(scan.toolStats)
     print("- journal entries: \(scan.journalEntries.count)")
     if scan.journalEntries.isEmpty {
         print("  - none")
@@ -320,7 +319,7 @@ case "scan-usage":
         for entry in scan.journalEntries.prefix(5) {
             let duration = Int(max(0, entry.endedAt.timeIntervalSince(entry.startedAt)).rounded())
             let file = URL(fileURLWithPath: entry.sourcePath).lastPathComponent
-            print("  - \(quotaDateFormatter.string(from: entry.startedAt)) - \(quotaDateFormatter.string(from: entry.endedAt)): \(duration)s · \(entry.tokens) tokens · \(money(entry.cost)) · \(file)")
+            print("  - \(quotaDateFormatter.string(from: entry.startedAt)) - \(quotaDateFormatter.string(from: entry.endedAt)): \(duration)s · \(entry.tokens) tokens · \(money(entry.cost)) · \(entry.model ?? AppStrings.Diagnostics.unknown) · \(file)")
         }
     }
 	default:
@@ -362,7 +361,6 @@ private func parsedDays(from args: [String]) -> Int? {
 
 private func exportJournalMarkdown(
     entries: [UsageSnapshot.JournalEntry],
-    models: [UsageSnapshot.ModelTokenUsage],
     days: Int
 ) -> String {
     let calendar = Calendar(identifier: .gregorian)
@@ -371,14 +369,6 @@ private func exportJournalMarkdown(
         .filter { $0.startedAt >= cutoff }
         .sorted { $0.startedAt < $1.startedAt }
     let titleDate = todayKey()
-    let topModel = models
-        .filter { $0.tokens > 0 }
-        .sorted {
-            if $0.tokens == $1.tokens { return $0.model < $1.model }
-            return $0.tokens > $1.tokens
-        }
-        .first?.model ?? AppStrings.Diagnostics.unknown
-
     var lines: [String] = [
         "# AgentPulse Journal - \(titleDate)",
         "",
@@ -404,7 +394,7 @@ private func exportJournalMarkdown(
         lines.append("Duration: \(markdownDuration(entry.durationSeconds))")
         lines.append("Tokens: \(markdownTokens(entry.tokens))")
         lines.append("Cost: \(money(entry.cost))")
-        lines.append("Model: \(topModel)")
+        lines.append("Model: \(entry.model ?? AppStrings.Diagnostics.unknown)")
         lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
         lines.append("")
     }
@@ -520,6 +510,21 @@ private func liveCodexStatus(in root: URL, settings: AgentPulseSettings) -> (fil
         }
 }
 
+private func currentPrimaryModel(in root: URL) -> String? {
+    recentCodexJSONLs(in: root, limit: 8)
+        .compactMap { file -> (model: String, age: TimeInterval)? in
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+            let lines = Array(text.split(separator: "\n").suffix(10_000)).map(String.init)
+            let result = CodexLogParser.parseRecentLines(lines)
+            guard let model = result.modelName,
+                  !model.lowercased().contains("auto-review") else { return nil }
+            let age = result.lastMeaningfulEventAt.map { Date().timeIntervalSince($0) } ?? latestModificationAge(file)
+            return (model, age)
+        }
+        .min { $0.age < $1.age }?
+        .model
+}
+
 private func freshnessScore(signal: AgentSignal, age: TimeInterval, settings: AgentPulseSettings) -> Int {
     let activeWindow: TimeInterval = signal == .done ? TimeInterval(settings.doneHoldSeconds) : 180
     guard age <= activeWindow else { return 0 }
@@ -537,7 +542,7 @@ private func latestCodexJSONL(in root: URL) -> URL? {
 }
 
 private func recentCodexJSONLs(in root: URL, limit: Int) -> [URL] {
-    candidateCodexSessionFiles(root: root, days: 7)
+    candidateCodexSessionFiles(root: root, days: 30)
         .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("rollout-") }
         .sorted {
             (latestModificationDate($0) ?? .distantPast) > (latestModificationDate($1) ?? .distantPast)

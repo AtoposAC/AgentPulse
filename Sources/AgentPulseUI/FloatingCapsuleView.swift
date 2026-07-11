@@ -318,14 +318,7 @@ public struct FloatingCapsuleView: View {
     }
 
     private var currentModelText: String? {
-        guard let model = agent.usage.modelTokenUsage
-            .filter({ $0.tokens > 0 })
-            .sorted(by: {
-                if $0.tokens == $1.tokens { return $0.model < $1.model }
-                return $0.tokens > $1.tokens
-            })
-            .first?.model
-        else { return nil }
+        guard let model = agent.usage.currentModel else { return nil }
         return "当前模型：\(model)"
     }
 

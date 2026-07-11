@@ -17,8 +17,16 @@ public enum CodexUsageScanner {
         var firstEventAt: Date?
         var lastEventAt: Date?
         var journalSegments: [JournalSegment] = []
+        var toolStats = ToolStats()
 
-        mutating func add(_ breakdown: TokenBreakdown, cost: Decimal?, model: String? = nil, day: String? = nil, eventDate: Date? = nil) {
+        mutating func add(
+            _ breakdown: TokenBreakdown,
+            cost: Decimal?,
+            model: String? = nil,
+            day: String? = nil,
+            eventDate: Date? = nil,
+            journalStartedAt: Date? = nil
+        ) {
             self.tokens += breakdown.total
             inputTokens += breakdown.input
             cachedInputTokens += breakdown.cached
@@ -27,7 +35,13 @@ public enum CodexUsageScanner {
                 self.cost = (self.cost ?? 0) + cost
             }
             if let eventDate, breakdown.total > 0 {
-                recordJournalUsage(at: eventDate, tokens: breakdown.total, cost: cost)
+                recordJournalUsage(
+                    startedAt: journalStartedAt,
+                    endedAt: eventDate,
+                    tokens: breakdown.total,
+                    cost: cost,
+                    model: model
+                )
             }
             if let day, breakdown.total > 0 {
                 dailyTokens[day, default: 0] += breakdown.total
@@ -61,6 +75,7 @@ public enum CodexUsageScanner {
                 costs: entry.modelCosts
             )
             addDailyTokens(entry.dailyTokens, costs: entry.dailyCosts)
+            toolStats.add(entry.toolStats)
         }
 
         mutating func merge(_ other: FileUsage) {
@@ -80,6 +95,7 @@ public enum CodexUsageScanner {
             )
             addDailyTokens(other.dailyTokens, costs: other.dailyCosts)
             noteEventRange(first: other.firstEventAt, last: other.lastEventAt)
+            toolStats.add(other.toolStats)
         }
 
         mutating func addDailyTokens(_ tokens: [String: Int], costs: [String: Decimal]) {
@@ -129,18 +145,20 @@ public enum CodexUsageScanner {
             }
         }
 
-        mutating func recordJournalUsage(at date: Date, tokens: Int, cost: Decimal?) {
+        mutating func recordJournalUsage(startedAt: Date?, endedAt: Date, tokens: Int, cost: Decimal?, model: String?) {
             guard tokens > 0 else { return }
+            let segmentStart = min(startedAt ?? endedAt, endedAt)
             if let last = journalSegments.indices.last,
-               date.timeIntervalSince(journalSegments[last].endedAt) <= journalMergeWindowSeconds {
-                journalSegments[last].endedAt = max(journalSegments[last].endedAt, date)
+               segmentStart.timeIntervalSince(journalSegments[last].endedAt) <= journalMergeWindowSeconds,
+               journalSegments[last].model == model {
+                journalSegments[last].endedAt = max(journalSegments[last].endedAt, endedAt)
                 journalSegments[last].tokens += tokens
                 if let cost {
                     journalSegments[last].cost = (journalSegments[last].cost ?? 0) + cost
                 }
                 return
             }
-            journalSegments.append(JournalSegment(startedAt: date, endedAt: date, tokens: tokens, cost: cost))
+            journalSegments.append(JournalSegment(startedAt: segmentStart, endedAt: endedAt, tokens: tokens, cost: cost, model: model))
         }
     }
 
@@ -149,6 +167,7 @@ public enum CodexUsageScanner {
         var endedAt: Date
         var tokens: Int
         var cost: Decimal?
+        var model: String?
     }
 
     private static let journalMergeWindowSeconds: TimeInterval = 5 * 60
@@ -173,7 +192,7 @@ public enum CodexUsageScanner {
         return (result.daily, result.models, result.cache)
     }
 
-    public static func scanUsage(root: URL, days: Int = 30, options: Options = Options(), cache: UsageCache?) -> (daily: [UsageSnapshot.DailyTokenUsage], models: [UsageSnapshot.ModelTokenUsage], journalEntries: [UsageSnapshot.JournalEntry], cache: UsageCache) {
+    public static func scanUsage(root: URL, days: Int = 30, options: Options = Options(), cache: UsageCache?) -> (daily: [UsageSnapshot.DailyTokenUsage], models: [UsageSnapshot.ModelTokenUsage], journalEntries: [UsageSnapshot.JournalEntry], toolStats: ToolStats, cache: UsageCache) {
         let calendar = Calendar(identifier: .gregorian)
         var totals: [String: FileUsage] = [:]
         var modelTotals = FileUsage()
@@ -251,7 +270,8 @@ public enum CodexUsageScanner {
                     modelOutputTokens: fileUsage.modelOutputTokens,
                     modelCosts: fileUsage.modelCosts,
                     dailyTokens: fileUsage.dailyTokens,
-                    dailyCosts: fileUsage.dailyCosts
+                    dailyCosts: fileUsage.dailyCosts,
+                    toolStats: fileUsage.toolStats
                 )
             }
         }
@@ -287,6 +307,7 @@ public enum CodexUsageScanner {
             daily,
             models,
             journalEntries.sorted { $0.endedAt > $1.endedAt },
+            modelTotals.toolStats,
             nextCache
         )
     }
@@ -301,7 +322,8 @@ public enum CodexUsageScanner {
 
     private static func appendJournalEntries(from fileUsage: FileUsage, path: String, cutoffDay: String, into entries: inout [UsageSnapshot.JournalEntry]) {
         if !fileUsage.journalSegments.isEmpty {
-            for (index, segment) in fileUsage.journalSegments.enumerated() where segment.tokens > 0 {
+            for (index, segment) in fileUsage.journalSegments.enumerated()
+            where segment.tokens > 0 && segment.endedAt > segment.startedAt {
                 guard dayKey(segment.startedAt) >= cutoffDay else { continue }
                 entries.append(
                     UsageSnapshot.JournalEntry(
@@ -310,7 +332,8 @@ public enum CodexUsageScanner {
                         endedAt: segment.endedAt,
                         tokens: segment.tokens,
                         cost: segment.cost,
-                        sourcePath: path
+                        sourcePath: path,
+                        model: segment.model
                     )
                 )
             }
@@ -329,7 +352,8 @@ public enum CodexUsageScanner {
                 endedAt: endedAt,
                 tokens: fileUsage.tokens,
                 cost: fileUsage.cost,
-                sourcePath: path
+                sourcePath: path,
+                model: fileUsage.modelTokens.max(by: { $0.value < $1.value })?.key
             )
         )
     }
@@ -339,6 +363,7 @@ public enum CodexUsageScanner {
         var usage = FileUsage()
         var maxTotalTokens = 0
         var lastModel: String?
+        var journalStartedAt: Date?
         for line in text.split(separator: "\n") {
             guard
                 let data = String(line).data(using: .utf8),
@@ -351,6 +376,19 @@ public enum CodexUsageScanner {
             }
 
             if let payload = object["payload"] as? [String: Any] {
+                CodexLogParser.recordToolCall(payload: payload, into: &usage.toolStats)
+                let payloadType = (payload["type"] as? String ?? "").lowercased()
+                if let eventDate {
+                    if payloadType == "task_started" || payloadType.contains("user_message") {
+                        journalStartedAt = eventDate
+                    } else if journalStartedAt == nil,
+                              payloadType.contains("reasoning")
+                                || payloadType.contains("agent_message")
+                                || payloadType.contains("tool_call")
+                                || payloadType.contains("function_call") {
+                        journalStartedAt = eventDate
+                    }
+                }
                 lastModel = modelName(in: object) ?? lastModel
                 lastModel = modelName(in: payload) ?? lastModel
                 if let info = payload["info"] as? [String: Any] {
@@ -358,7 +396,7 @@ public enum CodexUsageScanner {
                     let lastUsage = info["last_token_usage"] as? [String: Any]
                     let last = tokenBreakdown(lastUsage)
                     if last.total > 0 {
-                        usage.add(last, cost: cost(model: lastModel, usage: last, rawUsage: lastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
+                        usage.add(last, cost: cost(model: lastModel, usage: last, rawUsage: lastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate, journalStartedAt: journalStartedAt)
                     }
                     let total = tokenBreakdown(info["total_token_usage"])
                     maxTotalTokens = max(maxTotalTokens, total.total)
@@ -366,7 +404,7 @@ public enum CodexUsageScanner {
                 let directLastUsage = payload["last_token_usage"] as? [String: Any]
                 let directLast = tokenBreakdown(directLastUsage)
                 if directLast.total > 0 {
-                    usage.add(directLast, cost: cost(model: lastModel, usage: directLast, rawUsage: directLastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
+                    usage.add(directLast, cost: cost(model: lastModel, usage: directLast, rawUsage: directLastUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate, journalStartedAt: journalStartedAt)
                 }
                 let directTotal = tokenBreakdown(payload["total_token_usage"])
                 maxTotalTokens = max(maxTotalTokens, directTotal.total)
@@ -374,7 +412,10 @@ public enum CodexUsageScanner {
                 let usageField = tokenBreakdown(directUsage)
                 if usageField.total > 0 {
                     lastModel = directUsage.flatMap { modelName(in: $0) } ?? lastModel
-                    usage.add(usageField, cost: cost(model: lastModel, usage: usageField, rawUsage: directUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate)
+                    usage.add(usageField, cost: cost(model: lastModel, usage: usageField, rawUsage: directUsage, options: options), model: lastModel, day: eventDay, eventDate: eventDate, journalStartedAt: journalStartedAt)
+                }
+                if payloadType == "task_complete" || payloadType == "stop" || payloadType.contains("completed") {
+                    journalStartedAt = nil
                 }
             }
         }
@@ -385,7 +426,7 @@ public enum CodexUsageScanner {
                 usage.modelTokens[lastModel, default: 0] += maxTotalTokens
             }
             if let first = usage.firstEventAt, let last = usage.lastEventAt {
-                usage.journalSegments.append(JournalSegment(startedAt: first, endedAt: last, tokens: maxTotalTokens, cost: nil))
+                usage.journalSegments.append(JournalSegment(startedAt: first, endedAt: last, tokens: maxTotalTokens, cost: nil, model: normalizedModel(lastModel)))
             }
         }
         return usage

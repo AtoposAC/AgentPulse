@@ -1,7 +1,7 @@
 import Foundation
 
 public struct UsageCache: Codable, Sendable {
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public struct FileEntry: Codable, Sendable {
         public var path: String
@@ -20,6 +20,7 @@ public struct UsageCache: Codable, Sendable {
         public var modelCosts: [String: Decimal]
         public var dailyTokens: [String: Int]
         public var dailyCosts: [String: Decimal]
+        public var toolStats: ToolStats
 
         enum CodingKeys: String, CodingKey {
             case path
@@ -38,6 +39,7 @@ public struct UsageCache: Codable, Sendable {
             case modelCosts
             case dailyTokens
             case dailyCosts
+            case toolStats
         }
 
         public init(
@@ -56,7 +58,8 @@ public struct UsageCache: Codable, Sendable {
             modelOutputTokens: [String: Int] = [:],
             modelCosts: [String: Decimal] = [:],
             dailyTokens: [String: Int] = [:],
-            dailyCosts: [String: Decimal] = [:]
+            dailyCosts: [String: Decimal] = [:],
+            toolStats: ToolStats = ToolStats()
         ) {
             self.path = path
             self.modifiedAt = modifiedAt
@@ -74,6 +77,7 @@ public struct UsageCache: Codable, Sendable {
             self.modelCosts = modelCosts
             self.dailyTokens = dailyTokens
             self.dailyCosts = dailyCosts
+            self.toolStats = toolStats
         }
 
         public init(from decoder: Decoder) throws {
@@ -94,6 +98,7 @@ public struct UsageCache: Codable, Sendable {
             modelCosts = try container.decodeIfPresent([String: Decimal].self, forKey: .modelCosts) ?? [:]
             dailyTokens = try container.decodeIfPresent([String: Int].self, forKey: .dailyTokens) ?? [:]
             dailyCosts = try container.decodeIfPresent([String: Decimal].self, forKey: .dailyCosts) ?? [:]
+            toolStats = try container.decodeIfPresent(ToolStats.self, forKey: .toolStats) ?? ToolStats()
         }
 
         public var hasCurrentUsageDetails: Bool {

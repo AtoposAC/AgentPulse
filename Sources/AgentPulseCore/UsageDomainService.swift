@@ -5,6 +5,7 @@ public struct UsageDomainModel: Sendable {
         public let tokens: Int
         public let cost: Decimal?
         public let activeSeconds: TimeInterval
+        public let currentModel: String?
     }
 
     public struct TrendSummary: Sendable {
@@ -126,7 +127,8 @@ public enum UsageDomainService {
             today: UsageDomainModel.TodaySummary(
                 tokens: todayTokens,
                 cost: todayCost,
-                activeSeconds: todayActiveSeconds
+                activeSeconds: todayActiveSeconds,
+                currentModel: usage?.currentModel
             ),
             trend: UsageDomainModel.TrendSummary(
                 last7Days: last7Days,

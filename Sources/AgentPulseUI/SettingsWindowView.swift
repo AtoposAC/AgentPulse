@@ -207,6 +207,7 @@ private struct AgentsPage: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var message: String?
     @State private var recentClaudeHookEvents: [ClaudeHookEvent] = []
+    @State private var activityFilter: AgentActivityFilter = .all
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -217,9 +218,12 @@ private struct AgentsPage: View {
                 installed: true,
                 actions: {
                     Button("打开日志目录") { NSWorkspace.shared.open(store.codexSessionRoot) }
+                    Button("刷新状态") { store.refresh() }
                     Button("诊断事件") { copyCodexHint() }
                 }
             )
+            AgentMonitoringStatusView(status: codexMonitoringStatus)
+
             AgentToggleCard(
                 title: "Claude",
                 subtitle: "通过 Claude Code Hooks 监听状态事件；当前仅监测状态，不统计 Token / Cost。",
@@ -232,6 +236,7 @@ private struct AgentsPage: View {
                     Button("打开 Hook 日志") { NSWorkspace.shared.open(store.claudeHookLogURL.deletingLastPathComponent()) }
                 }
             )
+            AgentMonitoringStatusView(status: claudeMonitoringStatus)
             Text("Claude Hook 会写入 \(store.claudeHookLogURL.path)")
                 .font(.caption)
                 .foregroundStyle(store.settings.secondaryText(system: colorScheme))
@@ -265,7 +270,17 @@ private struct AgentsPage: View {
                         }
                     }
                 }
+            } else if store.settings.claudeMonitoringEnabled, claudeHookInstalled {
+                Text("Hook 已就绪，等待 Claude Code 产生可追踪事件。")
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
             }
+            AgentActivityTimeline(
+                events: activityEvents,
+                filter: $activityFilter,
+                claudeMonitoringEnabled: store.settings.claudeMonitoringEnabled,
+                claudeHookInstalled: claudeHookInstalled
+            )
         }
         .onAppear {
             refreshRecentClaudeHookEvents()
@@ -278,6 +293,97 @@ private struct AgentsPage: View {
 
     private var claudeHookStatus: HookManager.ClaudeHookStatus {
         HookManager.diagnoseClaudeHook()
+    }
+
+    private var activityEvents: [AgentEvent] {
+        store.agents
+            .flatMap(\.recentEvents)
+            .filter { activityFilter.matches($0.kind) }
+            .sorted { $0.date > $1.date }
+            .prefix(12)
+            .map { $0 }
+    }
+
+    private var codexMonitoringStatus: AgentMonitoringStatus {
+        guard store.settings.codexMonitoringEnabled else {
+            return AgentMonitoringStatus(
+                title: "Codex 监测已关闭",
+                detail: "开启后会读取 ~/.codex/sessions 中最近 7 天的本地会话日志。",
+                isHealthy: false
+            )
+        }
+
+        guard let codex = store.agents.first(where: { $0.kind == .codex }),
+              let path = codex.usage.latestSessionPath else {
+            return AgentMonitoringStatus(
+                title: "尚未检测到 Codex 会话",
+                detail: "完成一次 Codex 对话或任务后，AgentPulse 会在下一次扫描时显示活动和用量。",
+                isHealthy: false
+            )
+        }
+
+        var details = ["最新会话：\(URL(fileURLWithPath: path).lastPathComponent)"]
+        if let modifiedAt = codex.usage.latestSessionModifiedAt {
+            details.append("最新写入：\(statusDate(modifiedAt))")
+        }
+        if let scannedAt = codex.usage.usageScannedAt {
+            details.append("上次扫描：\(statusDate(scannedAt))")
+        } else {
+            details.append("用量扫描：等待首次完成")
+        }
+        details.append("已索引 \(codex.usage.scannedFileCount ?? 0) 个会话文件")
+
+        return AgentMonitoringStatus(
+            title: "本地会话已检测",
+            detail: "AgentPulse 正在读取 Codex 本地会话日志。",
+            isHealthy: true,
+            details: details
+        )
+    }
+
+    private var claudeMonitoringStatus: AgentMonitoringStatus {
+        let status = claudeHookStatus
+        guard store.settings.claudeMonitoringEnabled else {
+            return AgentMonitoringStatus(
+                title: "Claude 监测已关闭",
+                detail: "开启监测并安装 Hook 后，AgentPulse 会显示 Claude 的状态与工具事件。",
+                isHealthy: false
+            )
+        }
+        guard status.hookInstalled else {
+            let detail = status.settingsExists
+                ? "检测到 Claude 配置，但 AgentPulse Hook 脚本不可用；点击安装 Hook 可修复。"
+                : "安装 Hook 后，Claude Code 的状态与工具事件会写入本地日志。"
+            return AgentMonitoringStatus(
+                title: status.settingsExists ? "Claude Hook 需要修复" : "Claude Hook 尚未安装",
+                detail: detail,
+                isHealthy: false
+            )
+        }
+        guard status.logWritable else {
+            return AgentMonitoringStatus(
+                title: "Claude Hook 日志不可写",
+                detail: "请检查 Application Support 目录权限，然后重新安装 Hook。",
+                isHealthy: false
+            )
+        }
+
+        var details = ["Hook 脚本：可执行", "事件日志：可写"]
+        if let eventAt = status.latestEventAt {
+            details.append("最近事件：\(statusDate(eventAt))")
+        } else {
+            details.append("最近事件：尚未收到")
+        }
+        return AgentMonitoringStatus(
+            title: status.latestEventAt == nil ? "Claude Hook 已就绪，等待活动" : "Claude Hook 正在接收事件",
+            detail: "Claude 当前只提供状态和工具事件，不统计 Token / Cost。",
+            isHealthy: true,
+            details: details
+        )
+    }
+
+    private func statusDate(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<AgentPulseSettings, Value>) -> Binding<Value> {
@@ -327,6 +433,138 @@ private struct AgentsPage: View {
 
     private func refreshRecentClaudeHookEvents() {
         recentClaudeHookEvents = HookManager.recentClaudeHookEvents(limit: 3)
+    }
+}
+
+private struct AgentMonitoringStatus {
+    let title: String
+    let detail: String
+    let isHealthy: Bool
+    var details: [String] = []
+}
+
+private struct AgentMonitoringStatusView: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let status: AgentMonitoringStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(status.isHealthy ? AgentPulseColors.working : settings.secondaryText(system: colorScheme))
+                    .frame(width: 7, height: 7)
+                Text(status.title)
+                    .font(.caption.weight(.medium))
+            }
+            Text(status.detail)
+                .font(.caption)
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(status.details, id: \.self) { detail in
+                Text(detail)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(settings.tertiaryText(system: colorScheme))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+}
+
+private enum AgentActivityFilter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case codex = "Codex"
+    case claude = "Claude"
+
+    var id: String { rawValue }
+
+    func matches(_ kind: AgentKind) -> Bool {
+        switch self {
+        case .all: true
+        case .codex: kind == .codex
+        case .claude: kind == .claude
+        }
+    }
+}
+
+private struct AgentActivityTimeline: View {
+    @Environment(\.agentPulseSettings) private var settings
+    @Environment(\.colorScheme) private var colorScheme
+    let events: [AgentEvent]
+    @Binding var filter: AgentActivityFilter
+    let claudeMonitoringEnabled: Bool
+    let claudeHookInstalled: Bool
+
+    var body: some View {
+        GlassPanel(title: "最近活动") {
+            Picker("活动来源", selection: $filter) {
+                ForEach(AgentActivityFilter.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 300)
+
+            Text("Codex 显示状态变化；Claude 显示 Hook 事件。Codex 工作段请在用量中心的 Agent 日志中查看。")
+                .font(.caption)
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if events.isEmpty {
+                EmptyState(text: emptyText)
+            } else {
+                ForEach(events) { event in
+                    activityRow(event)
+                    if event.id != events.last?.id {
+                        Divider().opacity(0.35)
+                    }
+                }
+            }
+        }
+    }
+
+    private var emptyText: String {
+        switch filter {
+        case .codex:
+            "尚未记录 Codex 状态变化。运行一次 Codex 任务后会显示在这里。"
+        case .claude where !claudeMonitoringEnabled:
+            "Claude 监测尚未启用。"
+        case .claude where !claudeHookInstalled:
+            "安装 Claude Hook 后会显示 Claude 活动。"
+        default:
+            "尚未记录可展示的 Agent 活动。"
+        }
+    }
+
+    private func activityRow(_ event: AgentEvent) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Circle()
+                .fill(event.signal.pulseColor)
+                .frame(width: 8, height: 8)
+                .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(event.kind.displayName)
+                        .font(.caption.weight(.semibold))
+                    Text(event.kind == .codex ? "状态变化" : "Hook 事件")
+                        .font(.caption)
+                        .foregroundStyle(settings.tertiaryText(system: colorScheme))
+                }
+                Text(event.message)
+                    .font(.system(size: 13))
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(AgentPulseFormatters.relativeDate(event.date))
+                    .font(.caption.monospacedDigit())
+                Text(event.date.formatted(date: .omitted, time: .shortened))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(settings.tertiaryText(system: colorScheme))
+            }
+        }
     }
 }
 
@@ -495,7 +733,7 @@ private struct UsagePage: View {
 	            )
             UsageStoryCard(
                 todayTokens: usageCenter.today.tokens,
-                topModel: usageCenter.model.topModel?.model,
+                currentModel: usageCenter.today.currentModel,
                 totalCost: usageCenter.today.cost,
                 totalToolCalls: usageCenter.tool.totalCalls,
                 privacy: store.settings.privacyMode
@@ -560,7 +798,6 @@ private struct UsagePage: View {
             AgentJournalCard(
                 journal: usageCenter.journal,
                 todayTokens: usageCenter.today.tokens,
-                modelName: usageCenter.model.topModel?.model,
                 privacy: store.settings.privacyMode
             )
             GlassPanel(title: "数据来源") {
@@ -616,6 +853,8 @@ private struct UsagePage: View {
     }
 
     private var usageHealthTitle: String {
+        if store.isRefreshingUsage { return "正在刷新本地用量" }
+        if store.isRefreshingCodexState { return "正在读取最新 Codex 状态" }
         guard codex?.usage.usageScannedAt != nil else { return "等待首次用量扫描" }
         guard let latest = codex?.usage.latestSessionModifiedAt else { return "用量数据已就绪" }
         let age = Date().timeIntervalSince(latest)
@@ -627,6 +866,15 @@ private struct UsagePage: View {
     private var usageHealthDetail: String {
         let tokens = AgentPulseFormatters.tokens(codex?.usage.todayTokens)
         let scanned = codex?.usage.scannedFileCount ?? 0
+        if store.isRefreshingUsage {
+            if let scanDate = codex?.usage.usageScannedAt {
+                return "先显示 " + scanDate.formatted(date: .omitted, time: .standard) + " 的本地数据，完成后自动更新。"
+            }
+            return "正在首次扫描本地 Codex 会话日志。"
+        }
+        if store.isRefreshingCodexState {
+            return "先显示缓存数据；正在检查最近的 Codex 会话活动。"
+        }
         if let scanDate = codex?.usage.usageScannedAt {
             return "今日 \(tokens) · 已索引 \(scanned) 个会话 · \(scanDate.formatted(date: .omitted, time: .standard)) 更新"
         }
@@ -640,6 +888,9 @@ private struct UsagePage: View {
 
     private var scannedFileDetail: String {
         let count = codex?.usage.scannedFileCount ?? 0
+        if store.isRefreshingUsage {
+            return "正在后台刷新；当前显示上次成功扫描的数据。"
+        }
         let scanText = codex?.usage.usageScannedAt.map { " · 更新于 \($0.formatted(date: .omitted, time: .standard))" } ?? ""
         let latestText = latestSessionDetail
         return count > 0 ? "已索引 \(count) 个会话文件\(scanText)\(latestText)。" : "还没有索引到可用 usage 数据。"
@@ -655,6 +906,9 @@ private struct UsagePage: View {
     }
 
     private var quotaUpdateDetail: String {
+        if store.isRefreshingCodexQuota {
+            return "正在刷新 Codex WHAM；当前显示上次成功获取的额度数据。"
+        }
         guard let date = usageCenter.quota.updatedAt else {
             return "首次刷新后会优先尝试 Codex WHAM 额度接口。"
         }
@@ -1010,7 +1264,7 @@ private struct AboutPage: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.3"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.4"
     }
 
     private func checkForUpdates() {
@@ -1459,7 +1713,6 @@ private struct AgentJournalCard: View {
     @Environment(\.colorScheme) private var colorScheme
     let journal: UsageDomainModel.JournalSummary
     let todayTokens: Int
-    let modelName: String?
     let privacy: Bool
 
     @State private var range: JournalRange = .today
@@ -1595,7 +1848,7 @@ private struct AgentJournalCard: View {
         let visibleEntries = limit.map { Array(entries.prefix($0)) } ?? entries
         return VStack(alignment: .leading, spacing: 10) {
             ForEach(visibleEntries) { entry in
-                JournalEntryRow(entry: entry, dayTokens: totalTokens, modelName: modelName, privacy: privacy)
+                JournalEntryRow(entry: entry, dayTokens: totalTokens, privacy: privacy)
                 if entry.id != visibleEntries.last?.id {
                     Divider().opacity(0.35)
                 }
@@ -1661,7 +1914,7 @@ private struct AgentJournalCard: View {
             lines.append("Duration: \(AgentPulseFormatters.duration(entry.durationSeconds))")
             lines.append("Tokens: \(AgentPulseFormatters.tokens(entry.tokens))")
             lines.append("Cost: \(AgentPulseFormatters.money(entry.cost, privacy: privacy))")
-            lines.append("Model: \(modelName ?? "未知")")
+            lines.append("Model: \(entry.model ?? "未知")")
             lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
             lines.append("")
         }
@@ -1698,7 +1951,6 @@ private struct JournalEntryRow: View {
     @Environment(\.colorScheme) private var colorScheme
     let entry: UsageSnapshot.JournalEntry
     let dayTokens: Int
-    let modelName: String?
     let privacy: Bool
 
     var body: some View {
@@ -1710,8 +1962,8 @@ private struct JournalEntryRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(time(entry.startedAt)) - \(time(entry.endedAt)) · \(AgentPulseFormatters.duration(entry.durationSeconds))")
                         .font(.system(size: 14, weight: .semibold).monospacedDigit())
-                    if let modelName {
-                        Text("主要模型：\(modelName)")
+                    if let model = entry.model {
+                        Text("主要模型：\(model)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(settings.secondaryText(system: colorScheme))
                             .lineLimit(1)
@@ -1778,7 +2030,7 @@ private struct UsageStoryCard: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
     let todayTokens: Int
-    let topModel: String?
+    let currentModel: String?
     let totalCost: Decimal?
     let totalToolCalls: Int
     let privacy: Bool
@@ -1787,7 +2039,7 @@ private struct UsageStoryCard: View {
         GlassPanel(title: "今日使用概览") {
             VStack(alignment: .leading, spacing: 8) {
                 storyLine("今日使用 \(AgentPulseFormatters.tokens(todayTokens))")
-                storyLine("主要模型：\(topModel ?? "暂无模型数据")")
+                storyLine("当前模型：\(currentModel ?? "暂无模型数据")")
                 storyLine("主要活动：\(activityText)")
                 storyLine("今日花费：\(AgentPulseFormatters.money(totalCost, privacy: privacy))")
             }

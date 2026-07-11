@@ -6,13 +6,15 @@ public struct CodexParseResult: Sendable {
     public var toolStats: ToolStats
     public var eventMessage: String
     public var lastMeaningfulEventAt: Date?
+    public var modelName: String?
 
-    public init(signal: AgentSignal, usage: UsageSnapshot, toolStats: ToolStats, eventMessage: String, lastMeaningfulEventAt: Date? = nil) {
+    public init(signal: AgentSignal, usage: UsageSnapshot, toolStats: ToolStats, eventMessage: String, lastMeaningfulEventAt: Date? = nil, modelName: String? = nil) {
         self.signal = signal
         self.usage = usage
         self.toolStats = toolStats
         self.eventMessage = eventMessage
         self.lastMeaningfulEventAt = lastMeaningfulEventAt
+        self.modelName = modelName
     }
 }
 
@@ -24,6 +26,7 @@ public enum CodexLogParser {
         var toolStats = ToolStats()
         var message = "Agent 空闲"
         var lastMeaningfulEventAt: Date?
+        var modelName: String?
 
         for line in lines {
             guard
@@ -36,6 +39,10 @@ public enum CodexLogParser {
             let name = toolName(in: payload).lowercased()
             let eventDate = dateValue(object["timestamp"])
             let searchable = searchableText(payload: payload, name: name)
+            modelName = modelValue(in: object) ?? modelValue(in: payload) ?? modelName
+            if let info = payload["info"] as? [String: Any] {
+                modelName = modelValue(in: info) ?? modelName
+            }
 
             if isPermissionRequest(payloadType: payloadType, searchable: searchable) {
                 signal = .attention
@@ -63,23 +70,7 @@ public enum CodexLogParser {
                 lastMeaningfulEventAt = eventDate ?? lastMeaningfulEventAt
             }
 
-            if shouldCountTool(payloadType: payloadType, name: name) {
-                if name.contains("write_stdin") {
-                    toolStats.writeStdin += 1
-                } else if name.contains("web") || name.contains("browser") {
-                    toolStats.webRequests += 1
-                } else if name.contains("search") || name.contains("grep") || name == "rg" || name.contains("ripgrep") {
-                    toolStats.searchOperations += 1
-                } else if name.contains("read") || name.contains("open") || name.contains("view") || name.contains("cat") {
-                    toolStats.readOperations += 1
-                } else if name.contains("exec") || name.contains("bash") || name.contains("shell") || name.contains("terminal") || name.contains("command") {
-                    toolStats.terminalCommands += 1
-                } else if name.contains("edit") || name.contains("write") || name.contains("patch") {
-                    toolStats.fileChanges += 1
-                } else if !name.isEmpty {
-                    toolStats.other += 1
-                }
-            }
+            recordToolCall(payload: payload, into: &toolStats)
 
             if let usage = payload["usage"] as? [String: Any] {
                 tokens += intValue(usage["input_tokens"])
@@ -103,8 +94,40 @@ public enum CodexLogParser {
             ),
             toolStats: toolStats,
             eventMessage: message,
-            lastMeaningfulEventAt: lastMeaningfulEventAt
+            lastMeaningfulEventAt: lastMeaningfulEventAt,
+            modelName: modelName
         )
+    }
+
+    static func recordToolCall(payload: [String: Any], into toolStats: inout ToolStats) {
+        let payloadType = (payload["type"] as? String ?? "").lowercased()
+        let name = toolName(in: payload).lowercased()
+        guard shouldCountTool(payloadType: payloadType, name: name) else { return }
+        if name.contains("write_stdin") {
+            toolStats.writeStdin += 1
+        } else if name.contains("web") || name.contains("browser") {
+            toolStats.webRequests += 1
+        } else if name.contains("search") || name.contains("grep") || name == "rg" || name.contains("ripgrep") {
+            toolStats.searchOperations += 1
+        } else if name.contains("read") || name.contains("open") || name.contains("view") || name.contains("cat") {
+            toolStats.readOperations += 1
+        } else if name.contains("exec") || name.contains("bash") || name.contains("shell") || name.contains("terminal") || name.contains("command") {
+            toolStats.terminalCommands += 1
+        } else if name.contains("edit") || name.contains("write") || name.contains("patch") {
+            toolStats.fileChanges += 1
+        } else if !name.isEmpty {
+            toolStats.other += 1
+        }
+    }
+
+    private static func modelValue(in object: [String: Any]) -> String? {
+        for key in ["model", "model_slug", "model_name", "model_id"] {
+            if let value = object[key] as? String {
+                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !normalized.isEmpty { return normalized }
+            }
+        }
+        return nil
     }
 
     private static func todayKey() -> String {
