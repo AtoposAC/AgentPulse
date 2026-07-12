@@ -208,76 +208,85 @@ private struct AgentsPage: View {
     @State private var message: String?
     @State private var recentClaudeHookEvents: [ClaudeHookEvent] = []
     @State private var activityFilter: AgentActivityFilter = .all
+    @State private var activityDateFilter: AgentActivityDateFilter = .last7Days
+    @State private var activitySignalFilter: AgentActivitySignalFilter = .all
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            AgentToggleCard(
-                title: "Codex",
-                subtitle: "免 Hook 读取本地会话日志，适合 Desktop / CLI 场景。",
-                enabled: binding(\.codexMonitoringEnabled),
-                installed: true,
-                actions: {
-                    Button("打开日志目录") { NSWorkspace.shared.open(store.codexSessionRoot) }
-                    Button("刷新状态") { store.refresh() }
-                    Button("诊断事件") { copyCodexHint() }
-                }
-            )
-            AgentMonitoringStatusView(status: codexMonitoringStatus)
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 10) {
+                AgentToggleCard(
+                    title: "Codex",
+                    subtitle: "免 Hook 读取本地会话日志，适合 Desktop / CLI 场景。",
+                    enabled: binding(\.codexMonitoringEnabled),
+                    installed: true,
+                    actions: {
+                        Button("打开日志目录") { NSWorkspace.shared.open(store.codexSessionRoot) }
+                        Button("刷新状态") { store.refresh() }
+                        Button("诊断事件") { copyCodexHint() }
+                    }
+                )
+                AgentMonitoringStatusView(status: codexMonitoringStatus)
+            }
 
-            AgentToggleCard(
-                title: "Claude",
-                subtitle: "通过 Claude Code Hooks 监听状态事件；当前仅监测状态，不统计 Token / Cost。",
-                enabled: binding(\.claudeMonitoringEnabled),
-                installed: claudeHookInstalled,
-                actions: {
-                    Button(claudeHookInstalled ? "重装 Hook" : "安装 Hook") { installClaudeHook() }
-                    Button("测试 Hook") { testClaudeHook() }
-                    Button("卸载 Hook") { uninstallClaudeHook() }
-                    Button("打开 Hook 日志") { NSWorkspace.shared.open(store.claudeHookLogURL.deletingLastPathComponent()) }
-                }
-            )
-            AgentMonitoringStatusView(status: claudeMonitoringStatus)
-            Text("Claude Hook 会写入 \(store.claudeHookLogURL.path)")
-                .font(.caption)
-                .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if !claudeHookInstalled, claudeHookStatus.settingsExists {
-                Text("检测到 Claude 配置，但 AgentPulse Hook 脚本不可用；点击安装 Hook 可修复。")
+            VStack(alignment: .leading, spacing: 10) {
+                AgentToggleCard(
+                    title: "Claude",
+                    subtitle: "通过 Claude Code Hooks 监听状态事件；当前仅监测状态，不统计 Token / Cost。",
+                    enabled: binding(\.claudeMonitoringEnabled),
+                    installed: claudeHookInstalled,
+                    actions: {
+                        Button(claudeHookInstalled ? "重装 Hook" : "安装 Hook") { installClaudeHook() }
+                        Button("测试 Hook") { testClaudeHook() }
+                        Button("卸载 Hook") { uninstallClaudeHook() }
+                        Button("打开 Hook 日志") { NSWorkspace.shared.open(store.claudeHookLogURL.deletingLastPathComponent()) }
+                    }
+                )
+                AgentMonitoringStatusView(status: claudeMonitoringStatus)
+                Text("Claude Hook 会写入 \(store.claudeHookLogURL.path)")
                     .font(.caption)
                     .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-            }
-            if let message {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(message.contains("失败") ? store.settings.errorText(system: colorScheme) : store.settings.secondaryText(system: colorScheme))
-            }
-            if !recentClaudeHookEvents.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("最近 Claude Hook 事件")
-                        .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !claudeHookInstalled, claudeHookStatus.settingsExists {
+                    Text("检测到 Claude 配置，但 AgentPulse Hook 脚本不可用；点击安装 Hook 可修复。")
+                        .font(.caption)
                         .foregroundStyle(store.settings.secondaryText(system: colorScheme))
-                    ForEach(recentClaudeHookEvents.prefix(3), id: \.date) { event in
-                        HStack {
-                            Text(event.displayTitle)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .help(event.type)
-                            Spacer()
-                            Text(event.date.formatted(date: .omitted, time: .shortened))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(store.settings.tertiaryText(system: colorScheme))
+                }
+                if let message {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(message.contains("失败") ? store.settings.errorText(system: colorScheme) : store.settings.secondaryText(system: colorScheme))
+                }
+                if !recentClaudeHookEvents.isEmpty {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("最近 Claude Hook 事件")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(store.settings.secondaryText(system: colorScheme))
+                        ForEach(recentClaudeHookEvents.prefix(3), id: \.date) { event in
+                            HStack {
+                                Text(event.displayTitle)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .help(event.type)
+                                Spacer()
+                                Text(event.date.formatted(date: .omitted, time: .shortened))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(store.settings.tertiaryText(system: colorScheme))
+                            }
                         }
                     }
+                } else if store.settings.claudeMonitoringEnabled, claudeHookInstalled {
+                    Text("Hook 已就绪，等待 Claude Code 产生可追踪事件。")
+                        .font(.caption)
+                        .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 }
-            } else if store.settings.claudeMonitoringEnabled, claudeHookInstalled {
-                Text("Hook 已就绪，等待 Claude Code 产生可追踪事件。")
-                    .font(.caption)
-                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
             }
+
             AgentActivityTimeline(
                 events: activityEvents,
                 filter: $activityFilter,
+                dateFilter: $activityDateFilter,
+                signalFilter: $activitySignalFilter,
                 claudeMonitoringEnabled: store.settings.claudeMonitoringEnabled,
                 claudeHookInstalled: claudeHookInstalled
             )
@@ -299,9 +308,9 @@ private struct AgentsPage: View {
         store.agents
             .flatMap(\.recentEvents)
             .filter { activityFilter.matches($0.kind) }
+            .filter { activityDateFilter.matches($0.date) }
+            .filter { activitySignalFilter.matches($0.signal) }
             .sorted { $0.date > $1.date }
-            .prefix(12)
-            .map { $0 }
     }
 
     private var codexMonitoringStatus: AgentMonitoringStatus {
@@ -489,23 +498,92 @@ private enum AgentActivityFilter: String, CaseIterable, Identifiable {
     }
 }
 
+private enum AgentActivityDateFilter: String, CaseIterable, Identifiable {
+    case today = "今天"
+    case last7Days = "近 7 天"
+
+    var id: String { rawValue }
+
+    func matches(_ date: Date) -> Bool {
+        let calendar = Calendar(identifier: .gregorian)
+        switch self {
+        case .today:
+            return calendar.isDateInToday(date)
+        case .last7Days:
+            let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: Date())) ?? .distantPast
+            return date >= cutoff
+        }
+    }
+}
+
+private enum AgentActivitySignalFilter: String, CaseIterable, Identifiable {
+    case all = "全部状态"
+    case thinking = "思考"
+    case working = "执行"
+    case attention = "需关注"
+    case done = "完成"
+    case idle = "空闲"
+
+    var id: String { rawValue }
+
+    func matches(_ signal: AgentSignal) -> Bool {
+        switch self {
+        case .all: true
+        case .thinking: signal == .thinking
+        case .working: signal == .working
+        case .attention: signal == .attention
+        case .done: signal == .done
+        case .idle: signal == .idle
+        }
+    }
+}
+
 private struct AgentActivityTimeline: View {
     @Environment(\.agentPulseSettings) private var settings
     @Environment(\.colorScheme) private var colorScheme
     let events: [AgentEvent]
     @Binding var filter: AgentActivityFilter
+    @Binding var dateFilter: AgentActivityDateFilter
+    @Binding var signalFilter: AgentActivitySignalFilter
     let claudeMonitoringEnabled: Bool
     let claudeHookInstalled: Bool
 
     var body: some View {
         GlassPanel(title: "最近活动") {
-            Picker("活动来源", selection: $filter) {
-                ForEach(AgentActivityFilter.allCases) { item in
-                    Text(item.rawValue).tag(item)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Picker("活动日期", selection: $dateFilter) {
+                        ForEach(AgentActivityDateFilter.allCases) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
+
+                    Picker("活动来源", selection: $filter) {
+                        ForEach(AgentActivityFilter.allCases) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 280)
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 8) {
+                    Text("事件类型")
+                        .font(.caption)
+                        .foregroundStyle(settings.secondaryText(system: colorScheme))
+                    Picker("活动类型", selection: $signalFilter) {
+                        ForEach(AgentActivitySignalFilter.allCases) { item in
+                            Text(item.rawValue).tag(item)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    Spacer()
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 300)
 
             Text("Codex 显示状态变化；Claude 显示 Hook 事件。Codex 工作段请在用量中心的 Agent 日志中查看。")
                 .font(.caption)
@@ -515,10 +593,12 @@ private struct AgentActivityTimeline: View {
             if events.isEmpty {
                 EmptyState(text: emptyText)
             } else {
-                ForEach(events) { event in
-                    activityRow(event)
-                    if event.id != events.last?.id {
-                        Divider().opacity(0.35)
+                LazyVStack(spacing: 10) {
+                    ForEach(events) { event in
+                        activityRow(event)
+                        if event.id != events.last?.id {
+                            Divider().opacity(0.35)
+                        }
                     }
                 }
             }
@@ -560,7 +640,7 @@ private struct AgentActivityTimeline: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(AgentPulseFormatters.relativeDate(event.date))
                     .font(.caption.monospacedDigit())
-                Text(event.date.formatted(date: .omitted, time: .shortened))
+                Text(event.date.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(settings.tertiaryText(system: colorScheme))
             }
@@ -1264,7 +1344,7 @@ private struct AboutPage: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.4"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
     }
 
     private func checkForUpdates() {
@@ -1629,7 +1709,10 @@ private struct AgentToggleCard<Actions: View>: View {
                 Toggle("", isOn: $enabled)
                     .labelsHidden()
             }
-            HStack { actions }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { actions }
+                VStack(alignment: .leading, spacing: 8) { actions }
+            }
         }
     }
 }
@@ -1735,7 +1818,6 @@ private struct AgentJournalCard: View {
                 Button("导出") {
                     exportJournal()
                 }
-                .disabled(selectedEntries.isEmpty)
             }
 
             if let exportMessage {
@@ -1748,14 +1830,16 @@ private struct AgentJournalCard: View {
             case .today:
                 journalList(
                     entries: journal.todayEntries,
-                    totalTokens: todayTokens,
+                    group: group(for: dayKey(Date())),
+                    fallbackTokens: todayTokens,
                     expanded: $expandedCurrentDay,
                     emptyText: "今天还没有可展示的 Codex 工作段。"
                 )
             case .yesterday:
                 journalList(
                     entries: journal.yesterdayEntries,
-                    totalTokens: journal.yesterdayEntries.reduce(0) { $0 + $1.tokens },
+                    group: yesterdayKey.flatMap(group(for:)),
+                    fallbackTokens: journal.yesterdayEntries.reduce(0) { $0 + $1.tokens },
                     expanded: $expandedYesterday,
                     emptyText: "昨天没有可展示的 Codex 工作段。"
                 )
@@ -1816,14 +1900,30 @@ private struct AgentJournalCard: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                journalEntries(group.entries, totalTokens: group.totalTokens, limit: nil)
-                    .padding(.leading, 22)
+                VStack(alignment: .leading, spacing: 10) {
+                    dailySummary(group)
+                    if group.entries.isEmpty {
+                        EmptyState(text: "当天有用量，但没有可可靠归入工作段的记录。")
+                    } else {
+                        journalEntries(group.entries, totalTokens: group.totalTokens, limit: nil)
+                    }
+                }
+                .padding(.leading, 22)
             }
         }
     }
 
-    private func journalList(entries: [UsageSnapshot.JournalEntry], totalTokens: Int, expanded: Binding<Bool>, emptyText: String) -> some View {
+    private func journalList(
+        entries: [UsageSnapshot.JournalEntry],
+        group: UsageDomainModel.JournalSummary.DayGroup?,
+        fallbackTokens: Int,
+        expanded: Binding<Bool>,
+        emptyText: String
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let group {
+                dailySummary(group)
+            }
             if entries.isEmpty {
                 EmptyState(text: emptyText)
             } else {
@@ -1839,7 +1939,22 @@ private struct AgentJournalCard: View {
                         .font(.caption)
                     }
                 }
-                journalEntries(entries, totalTokens: totalTokens, limit: expanded.wrappedValue ? nil : collapsedLimit)
+                journalEntries(entries, totalTokens: group?.totalTokens ?? fallbackTokens, limit: expanded.wrappedValue ? nil : collapsedLimit)
+            }
+        }
+    }
+
+    private func dailySummary(_ group: UsageDomainModel.JournalSummary.DayGroup) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("每日总览 · \(AgentPulseFormatters.duration(group.totalDurationSeconds)) · \(AgentPulseFormatters.tokens(group.totalTokens)) · \(AgentPulseFormatters.money(group.totalCost, privacy: privacy))")
+                .font(.caption.weight(.medium))
+            Text("工作段小计：\(AgentPulseFormatters.tokens(group.attributedTokens)) · \(AgentPulseFormatters.money(group.attributedCost, privacy: privacy))")
+                .font(.caption)
+                .foregroundStyle(settings.secondaryText(system: colorScheme))
+            if group.reconciliationTokens != 0 || (group.reconciliationCost ?? 0) != 0 {
+                Text("跨日或未归入校准：\(signedTokens(group.reconciliationTokens)) · \(signedMoney(group.reconciliationCost))")
+                    .font(.caption)
+                    .foregroundStyle(settings.secondaryText(system: colorScheme))
             }
         }
     }
@@ -1858,27 +1973,25 @@ private struct AgentJournalCard: View {
 
     private var collapsedLimit: Int { 5 }
 
-    private var selectedEntries: [UsageSnapshot.JournalEntry] {
+    private var selectedGroups: [UsageDomainModel.JournalSummary.DayGroup] {
         switch range {
         case .today:
-            return journal.todayEntries
+            return group(for: dayKey(Date())).map { [$0] } ?? []
         case .yesterday:
-            return journal.yesterdayEntries
+            return yesterdayKey.flatMap(group(for:)).map { [$0] } ?? []
         case .last7Days:
-            return journal.last7DayGroups.flatMap(\.entries)
+            return journal.last7DayGroups
         }
     }
 
     private func exportJournal() {
-        let entries = selectedEntries.sorted { $0.startedAt < $1.startedAt }
-        guard !entries.isEmpty else { return }
         do {
             let paths = AppStoragePaths()
             try FileManager.default.createDirectory(at: paths.logs, withIntermediateDirectories: true)
             let timestamp = exportTimestamp()
             let fileName = "journal-\(rangeFileName)-\(timestamp).md"
             let url = paths.logs.appendingPathComponent(fileName)
-            try journalMarkdown(entries: entries).write(to: url, atomically: true, encoding: .utf8)
+            try journalMarkdown(groups: selectedGroups).write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
             exportMessage = "Journal 已导出"
         } catch {
@@ -1894,31 +2007,66 @@ private struct AgentJournalCard: View {
         }
     }
 
-    private func journalMarkdown(entries: [UsageSnapshot.JournalEntry]) -> String {
+    private func journalMarkdown(groups: [UsageDomainModel.JournalSummary.DayGroup]) -> String {
         var lines = [
             "# AgentPulse Journal - \(dayKey(Date()))",
             "",
             "Range: \(range.rawValue)",
             "Exported: \(Date().formatted(date: .numeric, time: .standard))",
+            "Source: Local Codex session logs (~/.codex/sessions)",
+            "Note: Daily usage is authoritative. Reconciliation accounts for cross-day segments and usage that cannot be assigned to a reliable work segment.",
             ""
         ]
-        var currentDay = ""
-        for entry in entries {
-            let day = dayKey(entry.startedAt)
-            if day != currentDay {
-                currentDay = day
-                lines.append("## \(day)")
+        guard !groups.isEmpty else {
+            lines.append("No usage or traceable Journal entries were found for this range.")
+            return lines.joined(separator: "\n")
+        }
+        for group in groups.sorted(by: { $0.date < $1.date }) {
+            lines.append("## \(group.date)")
+            lines.append("")
+            lines.append("Daily duration: \(AgentPulseFormatters.duration(group.totalDurationSeconds))")
+            lines.append("Daily tokens: \(AgentPulseFormatters.tokens(group.totalTokens))")
+            lines.append("Daily cost: \(AgentPulseFormatters.money(group.totalCost, privacy: privacy))")
+            lines.append("Journal tokens: \(AgentPulseFormatters.tokens(group.attributedTokens))")
+            lines.append("Journal cost: \(AgentPulseFormatters.money(group.attributedCost, privacy: privacy))")
+            lines.append("Reconciliation tokens: \(group.reconciliationTokens)")
+            lines.append("Reconciliation cost: \(group.reconciliationCost.map { NSDecimalNumber(decimal: $0).stringValue } ?? "unknown")")
+            lines.append("")
+            if group.entries.isEmpty {
+                lines.append("No traceable Journal work segments.")
+                lines.append("")
+                continue
+            }
+            for entry in group.entries.sorted(by: { $0.startedAt < $1.startedAt }) {
+                lines.append("### \(entry.startedAt.formatted(date: .omitted, time: .shortened)) - \(entry.endedAt.formatted(date: .omitted, time: .shortened))")
+                lines.append("Duration: \(AgentPulseFormatters.duration(entry.durationSeconds))")
+                lines.append("Tokens: \(AgentPulseFormatters.tokens(entry.tokens))")
+                lines.append("Cost: \(AgentPulseFormatters.money(entry.cost, privacy: privacy))")
+                lines.append("Model: \(entry.model ?? "未知")")
+                lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
                 lines.append("")
             }
-            lines.append("### \(entry.startedAt.formatted(date: .omitted, time: .shortened)) - \(entry.endedAt.formatted(date: .omitted, time: .shortened))")
-            lines.append("Duration: \(AgentPulseFormatters.duration(entry.durationSeconds))")
-            lines.append("Tokens: \(AgentPulseFormatters.tokens(entry.tokens))")
-            lines.append("Cost: \(AgentPulseFormatters.money(entry.cost, privacy: privacy))")
-            lines.append("Model: \(entry.model ?? "未知")")
-            lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
-            lines.append("")
         }
         return lines.joined(separator: "\n")
+    }
+
+    private func group(for day: String) -> UsageDomainModel.JournalSummary.DayGroup? {
+        journal.last7DayGroups.first { $0.date == day }
+    }
+
+    private var yesterdayKey: String? {
+        Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: Date()).map(dayKey)
+    }
+
+    private func signedTokens(_ value: Int) -> String {
+        let prefix = value > 0 ? "+" : value < 0 ? "-" : ""
+        return prefix + AgentPulseFormatters.tokens(abs(value))
+    }
+
+    private func signedMoney(_ value: Decimal?) -> String {
+        guard let value else { return "待确认" }
+        let prefix = value > 0 ? "+" : value < 0 ? "-" : ""
+        return prefix + AgentPulseFormatters.money(value < 0 ? -value : value, privacy: privacy)
     }
 
     private func exportTimestamp() -> String {

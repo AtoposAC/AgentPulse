@@ -306,10 +306,27 @@ public enum CodexUsageScanner {
         return (
             daily,
             models,
-            journalEntries.sorted { $0.endedAt > $1.endedAt },
+            normalizedJournalEntries(journalEntries),
             modelTotals.toolStats,
             nextCache
         )
+    }
+
+    private static func normalizedJournalEntries(_ entries: [UsageSnapshot.JournalEntry]) -> [UsageSnapshot.JournalEntry] {
+        var normalized: [UsageSnapshot.JournalEntry] = []
+        for entry in entries.sorted(by: { $0.endedAt > $1.endedAt }) {
+            let isDuplicate = normalized.contains { existing in
+                abs(existing.startedAt.timeIntervalSince(entry.startedAt)) < 1
+                    && abs(existing.endedAt.timeIntervalSince(entry.endedAt)) < 1
+                    && existing.tokens == entry.tokens
+                    && existing.cost == entry.cost
+                    && existing.model == entry.model
+            }
+            if !isDuplicate {
+                normalized.append(entry)
+            }
+        }
+        return normalized
     }
 
     private static func fileMetadata(_ url: URL) -> (modifiedAt: Date, size: Int64) {

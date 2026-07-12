@@ -490,7 +490,10 @@ public final class AgentPulseStore: ObservableObject {
         snapshot.statusReason = event.toolName.map { "Claude Hook · \(event.type) · \($0)" } ?? "Claude Hook · \(event.type)"
         snapshot.updatedAt = event.date
         snapshot.hookInstalled = HookManager.isClaudeHookInstalled()
-        snapshot.recentEvents = ([AgentEvent(date: event.date, kind: .claude, signal: event.signal, message: event.message)] + snapshot.recentEvents).prefix(50).map { $0 }
+        snapshot.recentEvents = Self.retainedRecentEvents(
+            prepending: AgentEvent(date: event.date, kind: .claude, signal: event.signal, message: event.message),
+            to: snapshot.recentEvents
+        )
         if event.signal == .working {
             incrementClaudeToolStats(toolName: event.toolName, snapshot: &snapshot)
         }
@@ -797,17 +800,32 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private static func normalizedRecentEvents(_ snapshot: AgentSnapshot) -> AgentSnapshot {
-        guard snapshot.kind == .codex else { return snapshot }
         var normalized = snapshot
-        normalized.recentEvents = snapshot.recentEvents.reduce(into: []) { events, event in
+        let calendar = Calendar(identifier: .gregorian)
+        let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: Date())) ?? .distantPast
+        normalized.recentEvents = snapshot.recentEvents
+            .filter { $0.date >= cutoff }
+            .sorted { $0.date > $1.date }
+            .reduce(into: []) { events, event in
             if let previous = events.last,
                previous.signal == event.signal,
                previous.message == event.message {
                 return
             }
             events.append(event)
-        }
+            }
+            .prefix(2_000)
+            .map { $0 }
         return normalized
+    }
+
+    private static func retainedRecentEvents(prepending event: AgentEvent, to events: [AgentEvent]) -> [AgentEvent] {
+        let calendar = Calendar(identifier: .gregorian)
+        let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: event.date)) ?? .distantPast
+        return ([event] + events)
+            .filter { $0.date >= cutoff }
+            .prefix(2_000)
+            .map { $0 }
     }
 
     private func latestJSONL(in root: URL) -> URL? {
@@ -1004,7 +1022,16 @@ private enum CodexRefreshWorker {
            previous.message == event.message {
             return
         }
-        snapshot.recentEvents = ([event] + snapshot.recentEvents).prefix(50).map { $0 }
+        snapshot.recentEvents = retainedRecentEvents(prepending: event, to: snapshot.recentEvents)
+    }
+
+    private static func retainedRecentEvents(prepending event: AgentEvent, to events: [AgentEvent]) -> [AgentEvent] {
+        let calendar = Calendar(identifier: .gregorian)
+        let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: event.date)) ?? .distantPast
+        return ([event] + events)
+            .filter { $0.date >= cutoff }
+            .prefix(2_000)
+            .map { $0 }
     }
 
     private static func isInternalReviewModel(_ model: String) -> Bool {

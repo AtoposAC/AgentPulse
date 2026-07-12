@@ -54,6 +54,10 @@ public struct UsageDomainModel: Sendable {
             public let totalDurationSeconds: TimeInterval
             public let totalTokens: Int
             public let totalCost: Decimal?
+            public let attributedTokens: Int
+            public let attributedCost: Decimal?
+            public let reconciliationTokens: Int
+            public let reconciliationCost: Decimal?
         }
 
         public let entries: [UsageSnapshot.JournalEntry]
@@ -161,7 +165,7 @@ public enum UsageDomainService {
                 entries: journalEntries,
                 todayEntries: journalEntries.filter { dayKey($0.startedAt, calendar: calendar) == todayKey },
                 yesterdayEntries: journalEntries.filter { dayKey($0.startedAt, calendar: calendar) == yesterdayKey },
-                last7DayGroups: journalDayGroups(from: journalEntries, calendar: calendar)
+                last7DayGroups: journalDayGroups(from: journalEntries, dailyUsage: dayMap, calendar: calendar, now: now)
             ),
             quota: UsageDomainModel.QuotaSummary(
                 fiveHourRemainingPercent: usage?.quota5hRemainingPercent,
@@ -221,21 +225,72 @@ public enum UsageDomainService {
 
     private static func journalDayGroups(
         from entries: [UsageSnapshot.JournalEntry],
-        calendar: Calendar
+        dailyUsage: [String: UsageSnapshot.DailyTokenUsage],
+        calendar: Calendar,
+        now: Date
     ) -> [UsageDomainModel.JournalSummary.DayGroup] {
         let grouped = Dictionary(grouping: entries) { dayKey($0.startedAt, calendar: calendar) }
-        return grouped
-            .map { date, items in
+        let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: now)) ?? .distantPast
+        let dates = Set(grouped.keys).union(
+            dailyUsage.values
+                .filter { $0.tokens > 0 && (date(fromDayKey: $0.date, calendar: calendar) ?? .distantPast) >= cutoff }
+                .map(\.date)
+        )
+        return dates
+            .map { date in
+                let items = grouped[date] ?? []
                 let sortedItems = items.sorted { $0.startedAt > $1.startedAt }
+                let journalTokens = sortedItems.reduce(0) { $0 + $1.tokens }
+                let journalCost = sumJournalCost(sortedItems)
+                let daily = dailyUsage[date]
+                let dailyTokens = daily?.tokens ?? journalTokens
+                let dailyCost = daily?.cost ?? journalCost
                 return UsageDomainModel.JournalSummary.DayGroup(
                     date: date,
                     entries: sortedItems,
-                    totalDurationSeconds: sortedItems.reduce(0) { $0 + $1.durationSeconds },
-                    totalTokens: sortedItems.reduce(0) { $0 + $1.tokens },
-                    totalCost: sumJournalCost(sortedItems)
+                    totalDurationSeconds: unionDuration(sortedItems),
+                    totalTokens: dailyTokens,
+                    totalCost: dailyCost,
+                    attributedTokens: journalTokens,
+                    attributedCost: journalCost,
+                    reconciliationTokens: dailyTokens - journalTokens,
+                    reconciliationCost: difference(dailyCost, journalCost)
                 )
             }
             .sorted { $0.date > $1.date }
+    }
+
+    private static func date(fromDayKey value: String, calendar: Calendar) -> Date? {
+        let components = value.split(separator: "-").compactMap { Int($0) }
+        guard components.count == 3 else { return nil }
+        return calendar.date(from: DateComponents(year: components[0], month: components[1], day: components[2]))
+    }
+
+    private static func unionDuration(_ entries: [UsageSnapshot.JournalEntry]) -> TimeInterval {
+        let intervals = entries
+            .filter { $0.endedAt > $0.startedAt }
+            .sorted { $0.startedAt < $1.startedAt }
+        guard var currentStart = intervals.first?.startedAt,
+              var currentEnd = intervals.first?.endedAt else {
+            return 0
+        }
+
+        var total: TimeInterval = 0
+        for entry in intervals.dropFirst() {
+            if entry.startedAt <= currentEnd {
+                currentEnd = max(currentEnd, entry.endedAt)
+            } else {
+                total += currentEnd.timeIntervalSince(currentStart)
+                currentStart = entry.startedAt
+                currentEnd = entry.endedAt
+            }
+        }
+        return total + currentEnd.timeIntervalSince(currentStart)
+    }
+
+    private static func difference(_ total: Decimal?, _ attributed: Decimal?) -> Decimal? {
+        guard let total else { return nil }
+        return total - (attributed ?? 0)
     }
 
     private static func dayKey(_ date: Date, calendar: Calendar) -> String {

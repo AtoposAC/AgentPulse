@@ -187,7 +187,11 @@ case "export-journal":
         ),
         cache: usageCache
     )
-    print(exportJournalMarkdown(entries: scan.journalEntries, days: max(1, days)))
+    var usage = UsageSnapshot()
+    usage.dailyTokenUsage = scan.daily
+    usage.journalEntries = scan.journalEntries
+    let journal = UsageDomainService.makeDomainModel(usage: usage).journal
+    print(exportJournalMarkdown(groups: journal.last7DayGroups, days: max(1, days)))
 case "doctor":
     let settings = JSONFileStore<AgentPulseSettings>(url: paths.settings).load(default: AgentPulseSettings())
     let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions")
@@ -360,45 +364,68 @@ private func parsedDays(from args: [String]) -> Int? {
 }
 
 private func exportJournalMarkdown(
-    entries: [UsageSnapshot.JournalEntry],
+    groups: [UsageDomainModel.JournalSummary.DayGroup],
     days: Int
 ) -> String {
     let calendar = Calendar(identifier: .gregorian)
     let cutoff = calendar.date(byAdding: .day, value: -(max(1, days) - 1), to: calendar.startOfDay(for: Date())) ?? Date()
-    let filtered = entries
-        .filter { $0.startedAt >= cutoff }
-        .sorted { $0.startedAt < $1.startedAt }
+    let filtered = groups
+        .filter { group in
+            guard let date = journalDate(group.date) else { return false }
+            return date >= cutoff
+        }
+        .sorted { $0.date < $1.date }
     let titleDate = todayKey()
     var lines: [String] = [
         "# AgentPulse Journal - \(titleDate)",
         "",
         "Exported: \(quotaDateFormatter.string(from: Date()))",
         "Range: Last \(max(1, days)) day\(days == 1 ? "" : "s")",
+        "Source: Local Codex session logs (~/.codex/sessions)",
+        "Note: Daily usage is authoritative. Reconciliation accounts for cross-day segments and usage that cannot be assigned to a reliable work segment.",
         ""
     ]
 
     guard !filtered.isEmpty else {
-        lines.append("No journal entries found.")
+        lines.append("No usage or traceable Journal entries were found for this range.")
         return lines.joined(separator: "\n")
     }
 
-    var currentDay = ""
-    for entry in filtered {
-        let day = dayKey(entry.startedAt)
-        if day != currentDay {
-            currentDay = day
-            lines.append("## \(day)")
+    for group in filtered {
+        lines.append("## \(group.date)")
+        lines.append("")
+        lines.append("Daily duration: \(markdownDuration(group.totalDurationSeconds))")
+        lines.append("Daily tokens: \(markdownTokens(group.totalTokens))")
+        lines.append("Daily cost: \(money(group.totalCost))")
+        lines.append("Journal tokens: \(markdownTokens(group.attributedTokens))")
+        lines.append("Journal cost: \(money(group.attributedCost))")
+        lines.append("Reconciliation tokens: \(group.reconciliationTokens)")
+        lines.append("Reconciliation cost: \(group.reconciliationCost.map { NSDecimalNumber(decimal: $0).stringValue } ?? "unknown")")
+        lines.append("")
+        if group.entries.isEmpty {
+            lines.append("No traceable Journal work segments.")
+            lines.append("")
+            continue
+        }
+        for entry in group.entries.sorted(by: { $0.startedAt < $1.startedAt }) {
+            lines.append("### \(timeOnly(entry.startedAt)) - \(timeOnly(entry.endedAt))")
+            lines.append("Duration: \(markdownDuration(entry.durationSeconds))")
+            lines.append("Tokens: \(markdownTokens(entry.tokens))")
+            lines.append("Cost: \(money(entry.cost))")
+            lines.append("Model: \(entry.model ?? AppStrings.Diagnostics.unknown)")
+            lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
             lines.append("")
         }
-        lines.append("### \(timeOnly(entry.startedAt)) - \(timeOnly(entry.endedAt))")
-        lines.append("Duration: \(markdownDuration(entry.durationSeconds))")
-        lines.append("Tokens: \(markdownTokens(entry.tokens))")
-        lines.append("Cost: \(money(entry.cost))")
-        lines.append("Model: \(entry.model ?? AppStrings.Diagnostics.unknown)")
-        lines.append("Source: \(URL(fileURLWithPath: entry.sourcePath).lastPathComponent)")
-        lines.append("")
     }
     return lines.joined(separator: "\n")
+}
+
+private func journalDate(_ value: String) -> Date? {
+    let formatter = DateFormatter()
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.date(from: value)
 }
 
 private func dayKey(_ date: Date) -> String {
