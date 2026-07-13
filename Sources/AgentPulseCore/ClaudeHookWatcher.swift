@@ -6,13 +6,15 @@ public struct ClaudeHookEvent: Sendable {
     public var message: String
     public var date: Date
     public var toolName: String?
+    public var isTest: Bool
 
-    public init(type: String, signal: AgentSignal, message: String, date: Date = Date(), toolName: String? = nil) {
+    public init(type: String, signal: AgentSignal, message: String, date: Date = Date(), toolName: String? = nil, isTest: Bool = false) {
         self.type = type
         self.signal = signal
         self.message = message
         self.date = date
         self.toolName = toolName
+        self.isTest = isTest
     }
 
     public var displayTitle: String {
@@ -23,10 +25,22 @@ public struct ClaudeHookEvent: Sendable {
             return toolName.map { "准备调用工具 · \($0)" } ?? "准备调用工具"
         case "PostToolUse":
             return toolName.map { "工具调用完成 · \($0)" } ?? "工具调用完成"
+        case "PostToolUseFailure":
+            return toolName.map { "工具调用失败 · \($0)" } ?? "工具调用失败"
+        case "PermissionRequest":
+            return "等待权限确认"
         case "Notification":
             return "需要关注"
+        case "SubagentStart":
+            return "子任务开始"
+        case "SubagentStop":
+            return "子任务完成"
         case "Stop":
             return "响应完成"
+        case "StopFailure":
+            return "响应异常中止"
+        case "SessionEnd":
+            return "会话结束"
         default:
             return "Claude 事件 · \(type)"
         }
@@ -70,20 +84,33 @@ public enum ClaudeHookEventParser {
 
         let date = dateValue(object["timestamp"]) ?? Date()
         let toolName = stringValue(in: object, keys: ["tool_name", "toolName", "tool", "name"])
+        let isTest = stringValue(in: object, keys: ["source"]) == "AgentPulse Test Event"
 
         switch eventType {
         case "UserPromptSubmit":
-            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 正在分析提示词", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 正在分析提示词", date: date, toolName: toolName, isTest: isTest)
         case "PreToolUse":
-            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude 准备调用工具 · \($0)" } ?? "Claude 准备调用工具", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude 正在调用工具 · \($0)" } ?? "Claude 正在调用工具", date: date, toolName: toolName, isTest: isTest)
         case "PostToolUse":
-            return ClaudeHookEvent(type: eventType, signal: .working, message: toolName.map { "Claude 工具调用完成 · \($0)" } ?? "Claude 工具调用完成", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: toolName.map { "Claude 已完成工具调用 · \($0)" } ?? "Claude 已完成工具调用", date: date, toolName: toolName, isTest: isTest)
+        case "PostToolUseFailure":
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: toolName.map { "Claude 正在处理工具失败 · \($0)" } ?? "Claude 正在处理工具失败", date: date, toolName: toolName, isTest: isTest)
+        case "PermissionRequest":
+            return ClaudeHookEvent(type: eventType, signal: .attention, message: toolName.map { "Claude 等待权限确认 · \($0)" } ?? "Claude 等待权限确认", date: date, toolName: toolName, isTest: isTest)
         case "Notification":
-            return ClaudeHookEvent(type: eventType, signal: .attention, message: "Claude 需要关注", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .attention, message: "Claude 需要关注", date: date, toolName: toolName, isTest: isTest)
+        case "SubagentStart":
+            return ClaudeHookEvent(type: eventType, signal: .working, message: "Claude 子任务执行中", date: date, toolName: toolName, isTest: isTest)
+        case "SubagentStop":
+            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 子任务已完成，继续处理", date: date, toolName: toolName, isTest: isTest)
         case "Stop":
-            return ClaudeHookEvent(type: eventType, signal: .done, message: "Claude 响应完成", date: date, toolName: toolName)
+            return ClaudeHookEvent(type: eventType, signal: .done, message: "Claude 响应完成", date: date, toolName: toolName, isTest: isTest)
+        case "StopFailure":
+            return ClaudeHookEvent(type: eventType, signal: .attention, message: "Claude 响应异常中止", date: date, toolName: toolName, isTest: isTest)
+        case "SessionEnd":
+            return ClaudeHookEvent(type: eventType, signal: .idle, message: "Claude 会话已结束", date: date, toolName: toolName, isTest: isTest)
         default:
-            return ClaudeHookEvent(type: eventType, signal: .thinking, message: "Claude 事件 · \(eventType)", date: date, toolName: toolName)
+            return nil
         }
     }
 
@@ -208,7 +235,11 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
             for line in lines {
                 guard let event = ClaudeHookEventParser.parse(line) else { continue }
                 Task { @MainActor in
-                    onEvent(event)
+                    if event.isTest {
+                        onDiagnostics(ClaudeHookDiagnostics(lastHookUpdateAt: hookUpdateAt))
+                    } else {
+                        onEvent(event)
+                    }
                 }
             }
         } catch {
@@ -227,6 +258,7 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
                 .reversed()
                 .lazy
                 .compactMap({ ClaudeHookEventParser.parse(String($0)) })
+                .filter({ !$0.isTest })
                 .first,
               Date().timeIntervalSince(event.date) <= startupReplayWindow else {
             return

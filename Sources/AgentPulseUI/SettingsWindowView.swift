@@ -377,11 +377,20 @@ private struct AgentsPage: View {
             )
         }
 
+        let claude = store.agents.first(where: { $0.kind == .claude })
         var details = ["Hook 脚本：可执行", "事件日志：可写"]
-        if let eventAt = status.latestEventAt {
-            details.append("最近事件：\(statusDate(eventAt))")
+        if let line = status.latestEventLine,
+           let event = ClaudeHookEventParser.parse(line) {
+            details.append("最近事件：\(event.displayTitle)")
+            details.append("事件时间：\(statusDate(event.date)) · \(AgentPulseFormatters.relativeDate(event.date))")
         } else {
             details.append("最近事件：尚未收到")
+        }
+        if let claude {
+            details.append("当前推导状态：\(claude.signal.title)")
+            if let reason = claude.statusReason, !reason.isEmpty {
+                details.append("状态依据：\(reason)")
+            }
         }
         return AgentMonitoringStatus(
             title: status.latestEventAt == nil ? "Claude Hook 已就绪，等待活动" : "Claude Hook 正在接收事件",
@@ -834,6 +843,9 @@ private struct UsagePage: View {
                 }
                 QuotaLine(title: "5 小时额度", value: usageCenter.quota.fiveHourRemainingPercent, detail: quotaResetDetail(usageCenter.quota.fiveHourResetAt, windowSeconds: usageCenter.quota.fiveHourWindowSeconds))
                 QuotaLine(title: "本周额度", value: usageCenter.quota.weekRemainingPercent, detail: quotaResetDetail(usageCenter.quota.weekResetAt, windowSeconds: usageCenter.quota.weekWindowSeconds, includesDate: true))
+                Text(quotaUpdateDetail)
+                    .font(.caption)
+                    .foregroundStyle(store.settings.secondaryText(system: colorScheme))
                 if let quotaErrorDetail {
                     StatusNote(text: quotaErrorDetail, tone: .warning)
                 }
@@ -1197,12 +1209,14 @@ private struct PreferencesPage: View {
                     Button("试听") { playPreview(.done) }
                         .disabled(!store.settings.doneSoundEnabled)
                 }
+                Toggle("完成系统通知", isOn: binding(\.doneNotificationEnabled))
                 HStack {
                     Toggle("需处理提示音", isOn: binding(\.attentionSoundEnabled))
                     Spacer()
                     Button("试听") { playPreview(.attention) }
                         .disabled(!store.settings.attentionSoundEnabled)
                 }
+                Toggle("需处理系统通知", isOn: binding(\.attentionNotificationEnabled))
                 Picker("提示音音量", selection: binding(\.soundVolume)) {
                     ForEach(AgentPulseSettings.SoundVolume.allCases) { volume in
                         Text(volume.title).tag(volume)
@@ -1344,7 +1358,7 @@ private struct AboutPage: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.5"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.6"
     }
 
     private func checkForUpdates() {
@@ -1863,9 +1877,13 @@ private struct AgentJournalCard: View {
             }
         }
         .onAppear {
-            guard !didInitializeExpandedGroups, let first = journal.last7DayGroups.first else { return }
+            guard !didInitializeExpandedGroups else { return }
             didInitializeExpandedGroups = true
-            expandedGroups.insert(first.date)
+            if let today = journal.last7DayGroups.first(where: { $0.date == dayKey(Date()) }) {
+                expandedGroups.insert(today.date)
+            } else if let first = journal.last7DayGroups.first {
+                expandedGroups.insert(first.date)
+            }
         }
     }
 
@@ -1952,7 +1970,7 @@ private struct AgentJournalCard: View {
                 .font(.caption)
                 .foregroundStyle(settings.secondaryText(system: colorScheme))
             if group.reconciliationTokens != 0 || (group.reconciliationCost ?? 0) != 0 {
-                Text("跨日或未归入校准：\(signedTokens(group.reconciliationTokens)) · \(signedMoney(group.reconciliationCost))")
+                Text("部分用量来自跨午夜任务或无法精确归入工作段，因此工作段小计与当天用量可能不同（差额 \(signedTokens(group.reconciliationTokens)) · \(signedMoney(group.reconciliationCost))）。")
                     .font(.caption)
                     .foregroundStyle(settings.secondaryText(system: colorScheme))
             }
@@ -1993,7 +2011,7 @@ private struct AgentJournalCard: View {
             let url = paths.logs.appendingPathComponent(fileName)
             try journalMarkdown(groups: selectedGroups).write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])
-            exportMessage = "Journal 已导出"
+            exportMessage = "Journal 已导出：\(fileName)"
         } catch {
             exportMessage = "导出失败：\(error.localizedDescription)"
         }
@@ -2014,7 +2032,7 @@ private struct AgentJournalCard: View {
             "Range: \(range.rawValue)",
             "Exported: \(Date().formatted(date: .numeric, time: .standard))",
             "Source: Local Codex session logs (~/.codex/sessions)",
-            "Note: Daily usage is authoritative. Reconciliation accounts for cross-day segments and usage that cannot be assigned to a reliable work segment.",
+            "Note: Daily usage is authoritative. Some usage may span midnight or cannot be assigned to a reliable work segment, so Journal subtotals can differ from daily usage.",
             ""
         ]
         guard !groups.isEmpty else {
@@ -2076,14 +2094,23 @@ private struct AgentJournalCard: View {
     }
 
     private func dayTitle(_ day: String) -> String {
+        guard let date = dayDate(day) else { return day }
+        let weekday = date.formatted(.dateTime.weekday(.wide))
         if day == dayKey(Date()) {
-            return "今天"
+            return "今天 · \(weekday)"
         }
         if let yesterday = Calendar(identifier: .gregorian).date(byAdding: .day, value: -1, to: Date()),
            day == dayKey(yesterday) {
-            return "昨天"
+            return "昨天 · \(weekday)"
         }
-        return day
+        return date.formatted(.dateTime.month(.defaultDigits).day().weekday(.wide))
+    }
+
+    private func dayDate(_ day: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: day)
     }
 
     private func dayKey(_ date: Date) -> String {

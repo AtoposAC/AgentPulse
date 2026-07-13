@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Combine
 import ServiceManagement
+import UserNotifications
 import AgentPulseCore
 import AgentPulseUI
 
@@ -25,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var lastSignals: [AgentKind: AgentSignal] = [:]
     private var lastLaunchAtLogin: Bool?
+    private var lastNotificationsEnabled: Bool?
     private var lastPresentationKey: PresentationKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -38,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         lastSignals = Dictionary(uniqueKeysWithValues: store.agents.map { ($0.kind, $0.signal) })
         lastLaunchAtLogin = store.settings.launchAtLogin
+        lastNotificationsEnabled = notificationsEnabled(for: store.settings)
         applyPresentationSettings()
         applyLoginItemSetting()
         store.$settings
@@ -46,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.updateSettingsWindowMaterial(settings)
                 self?.applySettingsWindowAppearance(settings)
                 self?.applyPresentationSettingsIfNeeded(settings)
+                self?.requestNotificationAuthorizationIfNeeded(settings)
                 if self?.lastLaunchAtLogin != settings.launchAtLogin {
                     self?.lastLaunchAtLogin = settings.launchAtLogin
                     self?.applyLoginItemSetting()
@@ -184,7 +188,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             default:
                 break
             }
+            notifyForSignalTransition(agent)
         }
+    }
+
+    private func notificationsEnabled(for settings: AgentPulseSettings) -> Bool {
+        settings.doneNotificationEnabled || settings.attentionNotificationEnabled
+    }
+
+    private func requestNotificationAuthorizationIfNeeded(_ settings: AgentPulseSettings) {
+        let enabled = notificationsEnabled(for: settings)
+        defer { lastNotificationsEnabled = enabled }
+        guard enabled, lastNotificationsEnabled != true else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func notifyForSignalTransition(_ agent: AgentSnapshot) {
+        guard !NSApp.isActive else { return }
+        let enabled: Bool
+        let title: String
+        let body: String
+        switch agent.signal {
+        case .done:
+            enabled = store.settings.doneNotificationEnabled
+            title = "\(agent.kind.displayName) 已完成"
+            body = "已完成一段工作。打开 AgentPulse 查看详情。"
+        case .attention:
+            enabled = store.settings.attentionNotificationEnabled
+            title = "\(agent.kind.displayName) 需要处理"
+            body = "检测到需要关注的状态。打开 AgentPulse 查看详情。"
+        default:
+            return
+        }
+        guard enabled else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = agent.kind.rawValue
+        let request = UNNotificationRequest(
+            identifier: "\(agent.kind.rawValue)-\(agent.signal.rawValue)-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     @available(macOS 13.0, *)

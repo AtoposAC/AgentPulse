@@ -382,7 +382,7 @@ private func exportJournalMarkdown(
         "Exported: \(quotaDateFormatter.string(from: Date()))",
         "Range: Last \(max(1, days)) day\(days == 1 ? "" : "s")",
         "Source: Local Codex session logs (~/.codex/sessions)",
-        "Note: Daily usage is authoritative. Reconciliation accounts for cross-day segments and usage that cannot be assigned to a reliable work segment.",
+        "Note: Daily usage is authoritative. Some usage may span midnight or cannot be assigned to a reliable work segment, so Journal subtotals can differ from daily usage.",
         ""
     ]
 
@@ -489,10 +489,16 @@ private func printClaudeHookDiagnostics() {
     print(check(status.hookScriptExecutable, "Hook executable", status.hookScriptExecutable ? "可执行" : "不可执行"))
     print(check(status.logExists, "Hook log", HookManager.claudeHookLogURL.path))
     print(check(status.logWritable, "Hook log writable", status.logWritable ? "可写" : "不可写"))
-    if let latest = status.latestEventLine {
-        print("Latest event: \(latest)")
+    if let latest = status.latestEventLine,
+       let event = ClaudeHookEventParser.parse(latest) {
+        let age = max(0, Int(Date().timeIntervalSince(event.date)))
+        print("Latest event type: \(event.type)")
+        print("Derived state: \(event.signal.title)")
+        print("Event summary: \(event.displayTitle)")
+        print("Event age: \(age)s")
     } else {
-        print("Latest event: none")
+        print("Latest event type: none")
+        print("Derived state: \(AgentSignal.idle.title)")
     }
     print("Latest event at: \(status.latestEventAt.map { quotaDateFormatter.string(from: $0) } ?? AppStrings.Diagnostics.unknown)")
 }

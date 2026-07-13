@@ -385,7 +385,7 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private var costDataSourceDescription: String {
-        "日志真实 cost 字段；缺失时使用隐藏模型费率表"
+        "日志真实 cost 优先；缺失时按公开 API 标准价估算（非实际账单）"
     }
 
     private func healthCheck(_ passed: Bool, _ title: String, _ detail: String) -> AgentPulseHealthCheck {
@@ -468,7 +468,7 @@ public final class AgentPulseStore: ObservableObject {
             snapshot.currentCommand = "Claude Hook 未安装"
             snapshot.statusReason = "需要在 Agent 页安装 Claude Code Hook"
             snapshot.updatedAt = Date()
-        } else if Date().timeIntervalSince(snapshot.updatedAt) > 180, snapshot.signal != .idle {
+        } else if shouldExpireClaudeState(snapshot, at: Date()) {
             snapshot.signal = .idle
             snapshot.currentCommand = "Claude 空闲"
             snapshot.statusReason = "等待 Claude Code Hook 事件"
@@ -494,11 +494,25 @@ public final class AgentPulseStore: ObservableObject {
             prepending: AgentEvent(date: event.date, kind: .claude, signal: event.signal, message: event.message),
             to: snapshot.recentEvents
         )
-        if event.signal == .working {
+        if event.type == "PreToolUse" {
             incrementClaudeToolStats(toolName: event.toolName, snapshot: &snapshot)
         }
         upsert(snapshot)
         persist()
+    }
+
+    private func shouldExpireClaudeState(_ snapshot: AgentSnapshot, at now: Date) -> Bool {
+        let age = now.timeIntervalSince(snapshot.updatedAt)
+        switch snapshot.signal {
+        case .idle, .attention:
+            return false
+        case .done:
+            return age > 15
+        case .thinking:
+            return age > 3 * 60
+        case .working:
+            return age > 30 * 60
+        }
     }
 
     private func incrementClaudeToolStats(toolName: String?, snapshot: inout AgentSnapshot) {
@@ -720,21 +734,8 @@ public final class AgentPulseStore: ObservableObject {
     }
 
     private func applyCodexQuota(_ quota: CodexQuotaSnapshot, to usage: inout UsageSnapshot) {
-        let fiveHourResetChanged = usage.quota5hResetAt != quota.quota5hResetAt
-        let weekResetChanged = usage.quotaWeekResetAt != quota.quotaWeekResetAt
-
-        if let value = quota.quota5hRemainingPercent {
-            usage.quota5hRemainingPercent = value
-        } else if fiveHourResetChanged {
-            usage.quota5hRemainingPercent = nil
-        }
-
-        if let value = quota.quotaWeekRemainingPercent {
-            usage.quotaWeekRemainingPercent = value
-        } else if weekResetChanged {
-            usage.quotaWeekRemainingPercent = nil
-        }
-
+        usage.quota5hRemainingPercent = quota.quota5hRemainingPercent
+        usage.quotaWeekRemainingPercent = quota.quotaWeekRemainingPercent
         usage.quota5hResetAt = quota.quota5hResetAt
         usage.quotaWeekResetAt = quota.quotaWeekResetAt
         usage.quota5hWindowSeconds = quota.quota5hWindowSeconds

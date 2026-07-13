@@ -535,6 +535,8 @@ public struct AgentPulseSettings: Codable, Equatable, Sendable {
     public var privacyMode: Bool
     public var doneSoundEnabled: Bool
     public var attentionSoundEnabled: Bool
+    public var doneNotificationEnabled: Bool
+    public var attentionNotificationEnabled: Bool
     public var soundVolume: SoundVolume
     public var showStatusBarIcon: Bool
     public var showFloatingWindow: Bool
@@ -556,6 +558,8 @@ public struct AgentPulseSettings: Codable, Equatable, Sendable {
         case privacyMode
         case doneSoundEnabled
         case attentionSoundEnabled
+        case doneNotificationEnabled
+        case attentionNotificationEnabled
         case soundVolume
         case showStatusBarIcon
         case showFloatingWindow
@@ -578,6 +582,8 @@ public struct AgentPulseSettings: Codable, Equatable, Sendable {
         privacyMode: Bool = false,
         doneSoundEnabled: Bool = true,
         attentionSoundEnabled: Bool = true,
+        doneNotificationEnabled: Bool = false,
+        attentionNotificationEnabled: Bool = false,
         soundVolume: SoundVolume = .medium,
         showStatusBarIcon: Bool = true,
         showFloatingWindow: Bool = true,
@@ -598,6 +604,8 @@ public struct AgentPulseSettings: Codable, Equatable, Sendable {
         self.privacyMode = privacyMode
         self.doneSoundEnabled = doneSoundEnabled
         self.attentionSoundEnabled = attentionSoundEnabled
+        self.doneNotificationEnabled = doneNotificationEnabled
+        self.attentionNotificationEnabled = attentionNotificationEnabled
         self.soundVolume = soundVolume
         self.showStatusBarIcon = showStatusBarIcon
         self.showFloatingWindow = showFloatingWindow
@@ -621,6 +629,8 @@ public struct AgentPulseSettings: Codable, Equatable, Sendable {
         privacyMode = try container.decodeIfPresent(Bool.self, forKey: .privacyMode) ?? false
         doneSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .doneSoundEnabled) ?? true
         attentionSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .attentionSoundEnabled) ?? true
+        doneNotificationEnabled = try container.decodeIfPresent(Bool.self, forKey: .doneNotificationEnabled) ?? false
+        attentionNotificationEnabled = try container.decodeIfPresent(Bool.self, forKey: .attentionNotificationEnabled) ?? false
         soundVolume = try container.decodeIfPresent(SoundVolume.self, forKey: .soundVolume) ?? .medium
         showStatusBarIcon = try container.decodeIfPresent(Bool.self, forKey: .showStatusBarIcon) ?? true
         showFloatingWindow = try container.decodeIfPresent(Bool.self, forKey: .showFloatingWindow) ?? true

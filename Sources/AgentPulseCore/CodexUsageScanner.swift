@@ -507,9 +507,12 @@ public enum CodexUsageScanner {
             return Decimal(usage.total) / 1_000_000 * totalPerMillion
         case .tokenClass(let inputPerMillion, let cachedInputPerMillion, let outputPerMillion):
             let billableInput = max(usage.input - usage.cached, 0)
-            let inputCost = Decimal(billableInput) / 1_000_000 * inputPerMillion
-            let cachedCost = Decimal(usage.cached) / 1_000_000 * cachedInputPerMillion
-            let outputCost = Decimal(usage.output) / 1_000_000 * outputPerMillion
+            let longContext = usesLongContextPricing(model) && usage.input > 272_000
+            let inputMultiplier: Decimal = longContext ? 2 : 1
+            let outputMultiplier: Decimal = longContext ? 1.5 : 1
+            let inputCost = Decimal(billableInput) / 1_000_000 * inputPerMillion * inputMultiplier
+            let cachedCost = Decimal(usage.cached) / 1_000_000 * cachedInputPerMillion * inputMultiplier
+            let outputCost = Decimal(usage.output) / 1_000_000 * outputPerMillion * outputMultiplier
             return inputCost + cachedCost + outputCost
         }
     }
@@ -521,11 +524,23 @@ public enum CodexUsageScanner {
 
     private static func pricing(for model: String?, options: Options) -> Pricing? {
         guard let model = model?.lowercased() else { return nil }
-        if model.contains("gpt-5.5") {
-            return .flatTotal(options.internalCostPerMillionTokens)
-        }
         if model.contains("codex-auto-review") {
             return .flatTotal(0)
+        }
+        if model.contains("gpt-5.6-terra") {
+            return .tokenClass(input: 2.5, cachedInput: 0.25, output: 15)
+        }
+        if model.contains("gpt-5.6-luna") {
+            return .tokenClass(input: 1, cachedInput: 0.1, output: 6)
+        }
+        if model.contains("gpt-5.6-sol") || model == "gpt-5.6" {
+            return .tokenClass(input: 5, cachedInput: 0.5, output: 30)
+        }
+        if model.contains("gpt-5.5") {
+            return .tokenClass(input: 5, cachedInput: 0.5, output: 30)
+        }
+        if model.contains("gpt-5.4") {
+            return .tokenClass(input: 2.5, cachedInput: 0.25, output: 15)
         }
         if model.contains("gpt-5-nano") {
             return .tokenClass(input: 0.05, cachedInput: 0.005, output: 0.4)
@@ -552,6 +567,11 @@ public enum CodexUsageScanner {
             return .flatTotal(options.internalCostPerMillionTokens)
         }
         return nil
+    }
+
+    private static func usesLongContextPricing(_ model: String?) -> Bool {
+        guard let model = model?.lowercased() else { return false }
+        return model.contains("gpt-5.4") || model.contains("gpt-5.5") || model.contains("gpt-5.6")
     }
 
     private static func intValue(_ value: Any?) -> Int {

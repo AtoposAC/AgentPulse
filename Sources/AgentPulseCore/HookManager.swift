@@ -29,7 +29,10 @@ public enum HookManager {
 
     public static func isClaudeHookInstalled() -> Bool {
         guard let text = try? String(contentsOf: claudeSettingsURL, encoding: .utf8) else { return false }
-        return text.contains(marker) && FileManager.default.isExecutableFile(atPath: hookScriptURL.path)
+        let requiredEvents = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "Stop", "StopFailure", "SessionEnd"]
+        return text.contains(marker)
+            && requiredEvents.allSatisfy { text.contains("\"\($0)\"") }
+            && FileManager.default.isExecutableFile(atPath: hookScriptURL.path)
     }
 
     public static func diagnoseClaudeHook() -> ClaudeHookStatus {
@@ -41,7 +44,7 @@ public enum HookManager {
         let logExists = fileManager.fileExists(atPath: claudeHookLogURL.path)
         let logWritable = fileManager.isWritableFile(atPath: claudeHookLogURL.path)
             || fileManager.isWritableFile(atPath: claudeHookLogURL.deletingLastPathComponent().path)
-        let latestLine = latestNonEmptyLine(in: claudeHookLogURL)
+        let latestLine = latestClaudeEventLine(in: claudeHookLogURL)
         return ClaudeHookStatus(
             settingsExists: settingsExists,
             settingsReadable: settingsReadable,
@@ -82,6 +85,7 @@ public enum HookManager {
             .reversed()
             .lazy
             .compactMap { ClaudeHookEventParser.parse(String($0)) }
+            .filter { !$0.isTest }
             .prefix(limit)
             .map { $0 }
     }
@@ -120,8 +124,14 @@ public enum HookManager {
             ("UserPromptSubmit", nil),
             ("PreToolUse", "*"),
             ("PostToolUse", "*"),
+            ("PostToolUseFailure", "*"),
+            ("PermissionRequest", "*"),
             ("Notification", "*"),
-            ("Stop", nil)
+            ("SubagentStart", nil),
+            ("SubagentStop", nil),
+            ("Stop", nil),
+            ("StopFailure", nil),
+            ("SessionEnd", nil)
         ]
         for event in events {
             var entries = hooks[event.name] as? [[String: Any]] ?? []
@@ -155,9 +165,16 @@ public enum HookManager {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private static func latestNonEmptyLine(in url: URL) -> String? {
+    private static func latestClaudeEventLine(in url: URL) -> String? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).last.map(String.init)
+        return text.split(separator: "\n", omittingEmptySubsequences: true)
+            .reversed()
+            .lazy
+            .map(String.init)
+            .first { line in
+                guard let event = ClaudeHookEventParser.parse(line) else { return false }
+                return !event.isTest
+            }
     }
 
     public static func uninstallClaudeHook() throws {

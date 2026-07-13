@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="AgentPulse"
 BUNDLE_ID="com.agentpulse.app"
-APP_VERSION="1.0.5"
+APP_VERSION="1.0.6"
 DIST_DIR="$PWD/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"

@@ -120,7 +120,7 @@ public enum UsageDomainService {
         let modelItems = modelItems(from: usage?.modelTokenUsage ?? [])
         let totalModelTokens = max(modelItems.reduce(0) { $0 + $1.tokens }, 1)
         let toolStats = usage?.toolStats ?? ToolStats()
-        let journalEntries = usage?.journalEntries ?? []
+        let journalEntries = journalEntriesForDisplay(usage?.journalEntries ?? [])
         let yesterdayKey = calendar.date(byAdding: .day, value: -1, to: now).map { dayKey($0, calendar: calendar) } ?? todayKey
         let todayJournalActiveSeconds = journalEntries
             .filter { dayKey($0.startedAt, calendar: calendar) == todayKey }
@@ -221,6 +221,52 @@ public enum UsageDomainService {
         let costs = values.compactMap(\.cost)
         guard !costs.isEmpty else { return nil }
         return costs.reduce(Decimal(0), +)
+    }
+
+    private static func journalEntriesForDisplay(_ entries: [UsageSnapshot.JournalEntry]) -> [UsageSnapshot.JournalEntry] {
+        var displayEntries: [UsageSnapshot.JournalEntry] = []
+        for entry in entries.sorted(by: {
+            if $0.startedAt == $1.startedAt {
+                return $0.endedAt > $1.endedAt
+            }
+            return $0.startedAt < $1.startedAt
+        }) {
+            guard isAutoReviewEntry(entry),
+                  let parentIndex = displayEntries.indices.reversed().first(where: { index in
+                      let parent = displayEntries[index]
+                      return !isAutoReviewEntry(parent) && canAbsorbAutoReview(entry, into: parent)
+                  }) else {
+                displayEntries.append(entry)
+                continue
+            }
+
+            // Auto-review runs inside a Codex task and is not a separate user-visible work segment.
+            displayEntries[parentIndex].startedAt = min(displayEntries[parentIndex].startedAt, entry.startedAt)
+            displayEntries[parentIndex].endedAt = max(displayEntries[parentIndex].endedAt, entry.endedAt)
+            displayEntries[parentIndex].durationSeconds = displayEntries[parentIndex].endedAt.timeIntervalSince(displayEntries[parentIndex].startedAt)
+            displayEntries[parentIndex].tokens += entry.tokens
+            displayEntries[parentIndex].cost = combinedJournalCost(displayEntries[parentIndex].cost, entry.cost)
+        }
+        return displayEntries
+    }
+
+    private static func isAutoReviewEntry(_ entry: UsageSnapshot.JournalEntry) -> Bool {
+        entry.model?.lowercased().contains("auto-review") == true
+    }
+
+    private static func canAbsorbAutoReview(_ review: UsageSnapshot.JournalEntry, into parent: UsageSnapshot.JournalEntry) -> Bool {
+        let mergeWindow: TimeInterval = 5 * 60
+        return review.startedAt <= parent.endedAt.addingTimeInterval(mergeWindow)
+            && review.endedAt <= parent.endedAt.addingTimeInterval(mergeWindow)
+    }
+
+    private static func combinedJournalCost(_ first: Decimal?, _ second: Decimal?) -> Decimal? {
+        switch (first, second) {
+        case let (first?, second?): first + second
+        case let (first?, nil): first
+        case let (nil, second?): second
+        case (nil, nil): nil
+        }
     }
 
     private static func journalDayGroups(

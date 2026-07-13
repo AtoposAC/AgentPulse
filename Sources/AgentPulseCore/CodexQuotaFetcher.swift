@@ -45,19 +45,7 @@ public enum CodexQuotaFetcher {
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw URLError(.badServerResponse)
         }
-        let decoded = try parseUsageResponse(data)
-        let primaryWindow = decoded.primaryWindow
-        let secondaryWindow = decoded.secondaryWindow
-        let primary = primaryWindow?.remainingPercent
-        let secondary = secondaryWindow?.remainingPercent
-        return CodexQuotaSnapshot(
-            quota5hRemainingPercent: primary,
-            quotaWeekRemainingPercent: secondary,
-            quota5hResetAt: primaryWindow?.resetAt,
-            quotaWeekResetAt: secondaryWindow?.resetAt,
-            quota5hWindowSeconds: primaryWindow?.limitWindowSeconds,
-            quotaWeekWindowSeconds: secondaryWindow?.limitWindowSeconds
-        )
+        return try parseSnapshot(data)
     }
 
     public static func fetchDebugDescription() async throws -> String {
@@ -76,9 +64,24 @@ public enum CodexQuotaFetcher {
         let parsed = try parseUsageResponse(data)
         return """
         HTTP \(statusCode)
-        Primary window: \(parsed.primaryWindow?.debugDescription ?? "missing")
-        Secondary window: \(parsed.secondaryWindow?.debugDescription ?? "missing")
+        Raw primary window: \(parsed.rawPrimaryWindow?.debugDescription ?? "missing")
+        Raw secondary window: \(parsed.rawSecondaryWindow?.debugDescription ?? "missing")
+        Classified 5h window: \(parsed.fiveHourWindow?.debugDescription ?? "missing")
+        Classified weekly window: \(parsed.weekWindow?.debugDescription ?? "missing")
         """
+    }
+
+    static func parseSnapshot(_ data: Data, updatedAt: Date = Date()) throws -> CodexQuotaSnapshot {
+        let parsed = try parseUsageResponse(data)
+        return CodexQuotaSnapshot(
+            quota5hRemainingPercent: parsed.fiveHourWindow?.remainingPercent,
+            quotaWeekRemainingPercent: parsed.weekWindow?.remainingPercent,
+            quota5hResetAt: parsed.fiveHourWindow?.resetAt,
+            quotaWeekResetAt: parsed.weekWindow?.resetAt,
+            quota5hWindowSeconds: parsed.fiveHourWindow?.limitWindowSeconds,
+            quotaWeekWindowSeconds: parsed.weekWindow?.limitWindowSeconds,
+            updatedAt: updatedAt
+        )
     }
 
     private struct Credentials {
@@ -127,20 +130,54 @@ public enum CodexQuotaFetcher {
             ?? dictionaryValue(root["rateLimit"])
             ?? dictionaryValue(root["usage"])
             ?? root
-        return ParsedUsageResponse(
-            primaryWindow: parseWindow(
-                dictionaryValue(container["primary_window"])
-                    ?? dictionaryValue(container["primaryWindow"])
-                    ?? dictionaryValue(container["five_hour_window"])
-                    ?? dictionaryValue(container["fiveHourWindow"])
-            ),
-            secondaryWindow: parseWindow(
-                dictionaryValue(container["secondary_window"])
-                    ?? dictionaryValue(container["secondaryWindow"])
-                    ?? dictionaryValue(container["weekly_window"])
-                    ?? dictionaryValue(container["weeklyWindow"])
-            )
+        let rawPrimary = parseWindow(
+            dictionaryValue(container["primary_window"])
+                ?? dictionaryValue(container["primaryWindow"])
         )
+        let rawSecondary = parseWindow(
+            dictionaryValue(container["secondary_window"])
+                ?? dictionaryValue(container["secondaryWindow"])
+        )
+        let explicitFiveHour = parseWindow(
+            dictionaryValue(container["five_hour_window"])
+                ?? dictionaryValue(container["fiveHourWindow"])
+        )
+        let explicitWeek = parseWindow(
+            dictionaryValue(container["weekly_window"])
+                ?? dictionaryValue(container["weeklyWindow"])
+        )
+        let genericWindows = [rawPrimary, rawSecondary].compactMap { $0 }
+        var fiveHour = explicitFiveHour ?? genericWindows.first(where: isFiveHourWindow)
+        var week = explicitWeek ?? genericWindows.first(where: isWeekWindow)
+
+        // Preserve the historical primary/secondary convention only when both windows exist
+        // and neither includes enough metadata to classify safely.
+        if fiveHour == nil,
+           week == nil,
+           let rawPrimary,
+           let rawSecondary,
+           rawPrimary.limitWindowSeconds == nil,
+           rawSecondary.limitWindowSeconds == nil {
+            fiveHour = rawPrimary
+            week = rawSecondary
+        }
+
+        return ParsedUsageResponse(
+            rawPrimaryWindow: rawPrimary,
+            rawSecondaryWindow: rawSecondary,
+            fiveHourWindow: fiveHour,
+            weekWindow: week
+        )
+    }
+
+    private static func isFiveHourWindow(_ window: ParsedWindow) -> Bool {
+        guard let seconds = window.limitWindowSeconds else { return false }
+        return (4 * 60 * 60)...(6 * 60 * 60) ~= seconds
+    }
+
+    private static func isWeekWindow(_ window: ParsedWindow) -> Bool {
+        guard let seconds = window.limitWindowSeconds else { return false }
+        return (5 * 24 * 60 * 60)...(8 * 24 * 60 * 60) ~= seconds
     }
 
     private static func parseWindow(_ window: [String: Any]?) -> ParsedWindow? {
@@ -205,8 +242,10 @@ public enum CodexQuotaFetcher {
 }
 
 private struct ParsedUsageResponse {
-    var primaryWindow: ParsedWindow?
-    var secondaryWindow: ParsedWindow?
+    var rawPrimaryWindow: ParsedWindow?
+    var rawSecondaryWindow: ParsedWindow?
+    var fiveHourWindow: ParsedWindow?
+    var weekWindow: ParsedWindow?
 }
 
 private struct ParsedWindow {

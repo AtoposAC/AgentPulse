@@ -2,6 +2,7 @@ import SwiftUI
 import AgentPulseCore
 
 public struct FloatingCapsuleStackView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var store: AgentPulseStore
     @State private var expanded = false
     @State private var hoverTimer: Timer?
@@ -20,7 +21,7 @@ public struct FloatingCapsuleStackView: View {
             hoverTimer?.invalidate()
             hoverTimer = Timer.scheduledTimer(withTimeInterval: inside ? 0.2 : 0.3, repeats: false) { _ in
                 Task { @MainActor in
-                    withAnimation(.easeInOut(duration: 0.24)) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.24)) {
                         expanded = inside
                     }
                 }
@@ -45,6 +46,7 @@ public struct FloatingCapsuleStackView: View {
 
 public struct FloatingCapsuleView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let agent: AgentSnapshot
     let agents: [AgentSnapshot]
     let settings: AgentPulseSettings
@@ -78,6 +80,8 @@ public struct FloatingCapsuleView: View {
     private var header: some View {
         HStack(spacing: expanded ? 9 : 5) {
             StatusDot(signal: agent.signal, compact: !expanded)
+                .id(agent.signal)
+                .transition(.opacity.combined(with: .scale(scale: 0.88)))
             VStack(alignment: .leading, spacing: expanded ? 2 : 1) {
                 Text("\(agent.kind.displayName) · \(agent.signal.title)")
                     .font(.system(size: 10))
@@ -86,16 +90,25 @@ public struct FloatingCapsuleView: View {
                 Text(primaryMetricText)
                     .font(.system(size: 14, weight: .bold).monospacedDigit())
                     .lineLimit(1)
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: primaryMetricText)
                 Text(secondaryMetricText)
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(AgentPulseColors.token)
                     .lineLimit(1)
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: secondaryMetricText)
             }
             Spacer(minLength: expanded ? 6 : 2)
             if agent.kind == .codex {
                 quotaBadge(agent.usage.quota5hRemainingPercent)
             }
         }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: agent.signal)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(agent.kind.displayName) 状态")
+        .accessibilityValue("\(agent.signal.title)，\(primaryMetricText)，\(secondaryMetricText)")
+        .accessibilityHint(expanded ? "已展开用量详情" : "将指针移到胶囊上可展开详情")
     }
 
     private var primaryMetricText: String {
@@ -122,8 +135,8 @@ public struct FloatingCapsuleView: View {
                 metricRow("费用", AgentPulseFormatters.money(agent.usage.todayCost, privacy: settings.privacyMode), title: "今日用量")
                 metricRow("Token", AgentPulseFormatters.tokens(agent.usage.todayTokens))
                 DividerLine(settings: settings)
-                quotaRow("5小时", value: agent.usage.quota5hRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quota5hResetAt, includesDate: false))
-                quotaRow("本周", value: agent.usage.quotaWeekRemainingPercent ?? 0, detail: quotaResetText(agent.usage.quotaWeekResetAt, includesDate: true))
+                quotaRow("5小时", value: agent.usage.quota5hRemainingPercent, detail: quotaResetText(agent.usage.quota5hResetAt, includesDate: false))
+                quotaRow("本周", value: agent.usage.quotaWeekRemainingPercent, detail: quotaResetText(agent.usage.quotaWeekResetAt, includesDate: true))
                 if let lowQuotaText {
                     Text(lowQuotaText)
                         .font(.system(size: 10, weight: .medium))
@@ -215,8 +228,8 @@ public struct FloatingCapsuleView: View {
         }
     }
 
-    private func quotaRow(_ label: String, value: Int, detail: String?) -> some View {
-        let accent = quotaAccent(value)
+    private func quotaRow(_ label: String, value: Int?, detail: String?) -> some View {
+        let accent = value.map(quotaAccent) ?? settings.secondaryText(system: colorScheme)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(label)
@@ -228,11 +241,11 @@ public struct FloatingCapsuleView: View {
                         Capsule().fill(settings.dividerColor(system: colorScheme))
                         Capsule()
                             .fill(LinearGradient(colors: [accent.opacity(0.65), accent], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: quotaBarWidth(totalWidth: geometry.size.width, value: value))
+                            .frame(width: quotaBarWidth(totalWidth: geometry.size.width, value: value ?? 0))
                     }
                 }
                 .frame(height: 6)
-                Text("\(value)%")
+                Text(value.map { "\($0)%" } ?? "--")
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(accent)
                     .frame(width: 32, alignment: .trailing)
@@ -381,38 +394,82 @@ private struct CapsuleGlassBackground: View {
 }
 
 private struct StatusDot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let signal: AgentSignal
     var compact = false
     @State private var phase = false
 
     var body: some View {
         ZStack {
-            if signal.pulsePeriod > 0 {
+            if signal == .thinking || signal == .attention {
                 Circle()
-                    .stroke(signal.pulseColor.opacity(phase ? 0.05 : 0.42), lineWidth: phase ? 1 : 2.2)
+                    .stroke(signal.pulseColor.opacity(phase ? 0.04 : 0.38), lineWidth: phase ? 1 : 2)
                     .frame(width: phase ? outerSize : coreSize, height: phase ? outerSize : coreSize)
                     .scaleEffect(phase ? 1.0 : 0.72)
+            }
+            if signal == .working {
                 Circle()
-                    .stroke(signal.pulseColor.opacity(phase ? 0.02 : 0.26), lineWidth: 1.5)
-                    .frame(width: phase ? outerSize + outerPadding : coreSize + 2, height: phase ? outerSize + outerPadding : coreSize + 2)
-                    .scaleEffect(phase ? 1.0 : 0.68)
+                    .trim(from: 0.08, to: 0.72)
+                    .stroke(
+                        AngularGradient(
+                            colors: [signal.pulseColor.opacity(0.15), signal.pulseColor, signal.pulseColor.opacity(0.15)],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: compact ? 1.5 : 2, lineCap: .round)
+                    )
+                    .frame(width: outerSize, height: outerSize)
+                    .rotationEffect(.degrees(phase ? 360 : 0))
             }
             Circle()
                 .fill(signal.pulseColor)
                 .frame(width: compact ? 7 : 11, height: compact ? 7 : 11)
+                .scaleEffect(coreScale)
+                .opacity(coreOpacity)
         }
         .frame(width: compact ? 14 : 26, height: compact ? 14 : 26)
-        .opacity(signal == .idle ? 0.62 : 1)
-            .onAppear { animate() }
-            .onChange(of: signal) { _, _ in animate() }
+        .accessibilityHidden(true)
+        .onAppear { animate() }
     }
 
     private func animate() {
         phase = false
-        guard signal.pulsePeriod > 0 else { return }
-        withAnimation(.easeOut(duration: signal.pulsePeriod).repeatForever(autoreverses: false)) {
-            phase = true
+        guard !reduceMotion else { return }
+        switch signal {
+        case .idle:
+            withAnimation(.easeInOut(duration: 3).repeatForever(autoreverses: true)) {
+                phase = true
+            }
+        case .thinking:
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+                phase = true
+            }
+        case .working:
+            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                phase = true
+            }
+        case .attention:
+            withAnimation(.easeInOut(duration: 0.28).repeatCount(3, autoreverses: true)) {
+                phase = true
+            }
+        case .done:
+            withAnimation(.easeOut(duration: 0.3)) {
+                phase = true
+            }
         }
+    }
+
+    private var coreScale: CGFloat {
+        switch signal {
+        case .idle: phase ? 1 : 0.88
+        case .thinking: phase ? 1.08 : 0.94
+        case .done: phase ? 1 : 0.72
+        default: 1
+        }
+    }
+
+    private var coreOpacity: Double {
+        guard signal == .idle else { return 1 }
+        return phase ? 1 : 0.85
     }
 
     private var outerSize: CGFloat {
@@ -427,10 +484,6 @@ private struct StatusDot: View {
 
     private var coreSize: CGFloat {
         compact ? 8 : 11
-    }
-
-    private var outerPadding: CGFloat {
-        compact ? 6 : 9
     }
 }
 

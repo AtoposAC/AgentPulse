@@ -184,13 +184,4 @@ public extension AgentSignal {
         case .attention: AgentPulseColors.attention
         }
     }
-
-    var pulsePeriod: Double {
-        switch self {
-        case .thinking: 1.2
-        case .working: 2.0
-        case .attention: 0.5
-        default: 0
-        }
-    }
 }

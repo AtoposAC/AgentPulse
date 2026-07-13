@@ -30,6 +30,11 @@ let package = Package(
             name: "AgentPulseCLI",
             dependencies: ["AgentPulseCore"],
             path: "Sources/AgentPulseCLI"
+        ),
+        .testTarget(
+            name: "AgentPulseCoreTests",
+            dependencies: ["AgentPulseCore"],
+            path: "Tests/AgentPulseCoreTests"
         )
     ]
 )

@@ -1,7 +1,7 @@
 import Foundation
 
 public struct UsageCache: Codable, Sendable {
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     public struct FileEntry: Codable, Sendable {
         public var path: String
