@@ -44,6 +44,33 @@ public struct FloatingCapsuleStackView: View {
     }
 }
 
+private enum CapsuleQuotaWindow {
+    case fiveHour
+    case week
+
+    var shortTitle: String {
+        switch self {
+        case .fiveHour: "5h"
+        case .week: "周"
+        }
+    }
+
+    var fullTitle: String {
+        switch self {
+        case .fiveHour: "5 小时"
+        case .week: "本周"
+        }
+    }
+
+    var other: CapsuleQuotaWindow {
+        self == .fiveHour ? .week : .fiveHour
+    }
+
+    mutating func toggle() {
+        self = other
+    }
+}
+
 public struct FloatingCapsuleView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -51,6 +78,7 @@ public struct FloatingCapsuleView: View {
     let agents: [AgentSnapshot]
     let settings: AgentPulseSettings
     let expanded: Bool
+    @State private var quotaWindow: CapsuleQuotaWindow = .fiveHour
 
     public init(agent: AgentSnapshot, agents: [AgentSnapshot] = [], settings: AgentPulseSettings, expanded: Bool) {
         self.agent = agent
@@ -99,16 +127,16 @@ public struct FloatingCapsuleView: View {
                     .contentTransition(.numericText())
                     .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: secondaryMetricText)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(agent.kind.displayName) 状态")
+            .accessibilityValue("\(agent.signal.title)，\(primaryMetricText)，\(secondaryMetricText)")
+            .accessibilityHint(expanded ? "已展开用量详情" : "将指针移到胶囊上可展开详情")
             Spacer(minLength: expanded ? 6 : 2)
             if agent.kind == .codex {
-                quotaBadge(agent.usage.quota5hRemainingPercent)
+                quotaBadge
             }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: agent.signal)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(agent.kind.displayName) 状态")
-        .accessibilityValue("\(agent.signal.title)，\(primaryMetricText)，\(secondaryMetricText)")
-        .accessibilityHint(expanded ? "已展开用量详情" : "将指针移到胶囊上可展开详情")
     }
 
     private var primaryMetricText: String {
@@ -279,29 +307,59 @@ public struct FloatingCapsuleView: View {
         return "重置 \(date.formatted(date: .omitted, time: .shortened))"
     }
 
-    private func quotaBadge(_ value: Int?) -> some View {
-        let percent = value
+    private var quotaBadge: some View {
+        let percent = selectedQuotaPercent
         let accent = percent.map(quotaAccent) ?? settings.secondaryText(system: colorScheme)
-        return Text(percent.map { "\($0)%" } ?? "--")
+        return Button {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                quotaWindow.toggle()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(quotaWindow.shortTitle)
+                Text(percent.map { "\($0)%" } ?? "--")
+                    .contentTransition(.numericText())
+            }
             .font(.system(size: 10, weight: .semibold).monospacedDigit())
             .foregroundStyle(accent)
-            .frame(minWidth: 34)
+            .frame(minWidth: 48)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(accent.opacity(0.08), in: Capsule())
             .overlay(Capsule().stroke(accent.opacity(0.82), lineWidth: 1))
-            .help(quotaBadgeHelp(percent: percent))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(quotaBadgeHelp(percent: percent))
+        .accessibilityLabel("\(quotaWindow.fullTitle)额度")
+        .accessibilityValue(percent.map { "剩余 \($0)%" } ?? "剩余额度未知")
+        .accessibilityHint("点击切换到\(quotaWindow.other.fullTitle)额度")
     }
 
     private func quotaBadgeHelp(percent: Int?) -> String {
-        var text = percent.map { "5 小时额度剩余 \($0)%" } ?? "5 小时额度剩余未知"
-        if let reset = quotaResetText(agent.usage.quota5hResetAt, includesDate: false) {
+        var text = percent.map { "\(quotaWindow.fullTitle)额度剩余 \($0)%" } ?? "\(quotaWindow.fullTitle)额度剩余未知"
+        if let reset = quotaResetText(selectedQuotaResetAt, includesDate: quotaWindow == .week) {
             text += " · \(reset)"
         }
         if let source = agent.usage.quotaDataSource {
             text += " · \(source)"
         }
+        text += " · 点击切换到\(quotaWindow.other.fullTitle)"
         return text
+    }
+
+    private var selectedQuotaPercent: Int? {
+        switch quotaWindow {
+        case .fiveHour: agent.usage.quota5hRemainingPercent
+        case .week: agent.usage.quotaWeekRemainingPercent
+        }
+    }
+
+    private var selectedQuotaResetAt: Date? {
+        switch quotaWindow {
+        case .fiveHour: agent.usage.quota5hResetAt
+        case .week: agent.usage.quotaWeekResetAt
+        }
     }
 
     private var capsuleHelpText: String {
@@ -401,24 +459,11 @@ private struct StatusDot: View {
 
     var body: some View {
         ZStack {
-            if signal == .thinking || signal == .attention {
+            if signal == .thinking || signal == .working || signal == .attention {
                 Circle()
                     .stroke(signal.pulseColor.opacity(phase ? 0.04 : 0.38), lineWidth: phase ? 1 : 2)
                     .frame(width: phase ? outerSize : coreSize, height: phase ? outerSize : coreSize)
                     .scaleEffect(phase ? 1.0 : 0.72)
-            }
-            if signal == .working {
-                Circle()
-                    .trim(from: 0.08, to: 0.72)
-                    .stroke(
-                        AngularGradient(
-                            colors: [signal.pulseColor.opacity(0.15), signal.pulseColor, signal.pulseColor.opacity(0.15)],
-                            center: .center
-                        ),
-                        style: StrokeStyle(lineWidth: compact ? 1.5 : 2, lineCap: .round)
-                    )
-                    .frame(width: outerSize, height: outerSize)
-                    .rotationEffect(.degrees(phase ? 360 : 0))
             }
             Circle()
                 .fill(signal.pulseColor)
@@ -444,7 +489,7 @@ private struct StatusDot: View {
                 phase = true
             }
         case .working:
-            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+            withAnimation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true)) {
                 phase = true
             }
         case .attention:
@@ -462,6 +507,7 @@ private struct StatusDot: View {
         switch signal {
         case .idle: phase ? 1 : 0.88
         case .thinking: phase ? 1.08 : 0.94
+        case .working: phase ? 1.04 : 0.96
         case .done: phase ? 1 : 0.72
         default: 1
         }
