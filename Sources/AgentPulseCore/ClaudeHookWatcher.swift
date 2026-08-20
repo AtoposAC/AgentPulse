@@ -200,7 +200,7 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
             queue: queue
         )
         source.setEventHandler { [weak self] in
-            self?.readNewLines()
+            self?.handleFileEvent()
         }
         source.setCancelHandler { [fileDescriptor] in
             if fileDescriptor >= 0 {
@@ -211,22 +211,37 @@ public final class ClaudeHookWatcher: @unchecked Sendable {
         source.resume()
     }
 
+    private func handleFileEvent() {
+        guard let source else { return }
+        let event = source.data
+        if event.contains(.rename) || event.contains(.delete) {
+            source.cancel()
+            self.source = nil
+            fileDescriptor = -1
+            startOnQueue()
+            return
+        }
+        readNewLines()
+    }
+
     private func readNewLines() {
         let size = fileSize(logURL)
         if size < offset {
-            offset = size
-            return
+            offset = 0
         }
         guard size > offset,
               let handle = try? FileHandle(forReadingFrom: logURL) else {
             return
         }
         do {
+            let startOffset = offset
             try handle.seek(toOffset: offset)
             let data = try handle.readToEnd() ?? Data()
-            offset = try handle.offset()
             try handle.close()
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard let newlineIndex = data.lastIndex(of: 0x0A) else { return }
+            let completeData = data[...newlineIndex]
+            offset = startOffset + UInt64(completeData.count)
+            guard let text = String(data: completeData, encoding: .utf8) else { return }
             let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
             let hookUpdateAt = Date()
             Task { @MainActor in

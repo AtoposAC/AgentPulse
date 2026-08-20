@@ -147,6 +147,9 @@ public final class AgentPulseStore: ObservableObject {
         let activityWindow: TimeInterval = 120
         let active = agents.filter { snapshot in
             guard snapshot.kind == .codex || snapshot.kind == .claude else { return false }
+            if snapshot.kind == .claude && !snapshot.hookInstalled {
+                return false
+            }
             if snapshot.signal != .idle {
                 return true
             }
@@ -468,7 +471,7 @@ public final class AgentPulseStore: ObservableObject {
             snapshot.currentCommand = "Claude Hook 未安装"
             snapshot.statusReason = "需要在 Agent 页安装 Claude Code Hook"
             snapshot.updatedAt = Date()
-        } else if shouldExpireClaudeState(snapshot, at: Date()) {
+        } else if Self.shouldExpireClaudeState(snapshot, at: Date()) {
             snapshot.signal = .idle
             snapshot.currentCommand = "Claude 空闲"
             snapshot.statusReason = "等待 Claude Code Hook 事件"
@@ -501,11 +504,14 @@ public final class AgentPulseStore: ObservableObject {
         persist()
     }
 
-    private func shouldExpireClaudeState(_ snapshot: AgentSnapshot, at now: Date) -> Bool {
+    static func shouldExpireClaudeState(_ snapshot: AgentSnapshot, at now: Date) -> Bool {
         let age = now.timeIntervalSince(snapshot.updatedAt)
         switch snapshot.signal {
-        case .idle, .attention:
+        case .idle:
             return false
+        case .attention:
+            let isPermissionRequest = snapshot.statusReason?.contains("PermissionRequest") == true
+            return age > (isPermissionRequest ? 2 * 60 * 60 : 10 * 60)
         case .done:
             return age > 15
         case .thinking:
@@ -978,18 +984,18 @@ private enum CodexRefreshWorker {
             usage.usageScannedAt = Date()
             usage.journalEntries = scan.journalEntries
             usage.toolStats = scan.toolStats
+            usage.dailyTokenUsage = daily
+            usage.modelTokenUsage = scan.models
+            usage.inputTokens = scan.models.reduce(0) { $0 + $1.inputTokens }
+            usage.cachedInputTokens = scan.models.reduce(0) { $0 + $1.cachedInputTokens }
+            usage.outputTokens = scan.models.reduce(0) { $0 + $1.outputTokens }
+            usage.thirtyDayTokens = daily.reduce(0) { $0 + $1.tokens }
+            let costs = daily.compactMap(\.cost)
+            usage.thirtyDayCost = costs.isEmpty ? nil : costs.reduce(Decimal(0), +)
+            let today = daily.last { $0.date == todayKey() }
+            usage.todayTokens = today?.tokens ?? 0
+            usage.todayCost = today?.cost
             if !daily.isEmpty {
-                usage.dailyTokenUsage = daily
-                usage.modelTokenUsage = scan.models
-                usage.inputTokens = scan.models.reduce(0) { $0 + $1.inputTokens }
-                usage.cachedInputTokens = scan.models.reduce(0) { $0 + $1.cachedInputTokens }
-                usage.outputTokens = scan.models.reduce(0) { $0 + $1.outputTokens }
-                usage.thirtyDayTokens = daily.reduce(0) { $0 + $1.tokens }
-                let costs = daily.compactMap(\.cost)
-                usage.thirtyDayCost = costs.isEmpty ? nil : costs.reduce(Decimal(0), +)
-                let today = daily.last { $0.date == todayKey() }
-                usage.todayTokens = today?.tokens ?? usage.todayTokens
-                usage.todayCost = today?.cost ?? usage.todayCost
                 usage.quota5hRemainingPercent = remainingPercent(
                     budget: 50_000_000,
                     used: rollingTokens(hours: 5, cache: scan.cache)
@@ -1003,6 +1009,7 @@ private enum CodexRefreshWorker {
         }
 
         snapshot.usage = usage
+        snapshot.toolStats = usage.toolStats
         return Result(snapshot: snapshot, usageCache: updatedCache)
     }
 

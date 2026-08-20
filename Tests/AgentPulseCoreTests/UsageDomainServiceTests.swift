@@ -75,6 +75,58 @@ final class UsageDomainServiceTests: XCTestCase {
         XCTAssertEqual(journal.last7DayGroups[0].totalDurationSeconds, 660)
     }
 
+    func testDuplicateJournalEntriesAreDisplayedAndAttributedOnce() {
+        let entry = journalEntry(
+            start: "2026-07-13T10:00:00Z",
+            end: "2026-07-13T10:10:00Z",
+            tokens: 100,
+            cost: 1,
+            model: "gpt-5.6-terra"
+        )
+
+        let journal = journal(entries: [entry, entry], tokens: 100, cost: 1)
+
+        XCTAssertEqual(journal.todayEntries.count, 1)
+        XCTAssertEqual(journal.last7DayGroups[0].attributedTokens, 100)
+        XCTAssertEqual(journal.last7DayGroups[0].attributedCost, 1)
+        XCTAssertEqual(journal.last7DayGroups[0].reconciliationTokens, 0)
+    }
+
+    func testLastSevenDayGroupsExcludeEntriesThatHaveAgedOutSinceScanning() {
+        let expired = journalEntry(
+            start: "2026-07-06T10:00:00Z",
+            end: "2026-07-06T10:10:00Z",
+            tokens: 100,
+            cost: 1,
+            model: "gpt-5.6-terra"
+        )
+        let boundary = journalEntry(
+            start: "2026-07-07T10:00:00Z",
+            end: "2026-07-07T10:10:00Z",
+            tokens: 200,
+            cost: 2,
+            model: "gpt-5.6-terra"
+        )
+        let usage = UsageSnapshot(
+            dailyTokenUsage: [
+                .init(date: "2026-07-06", tokens: 100, cost: 1),
+                .init(date: "2026-07-07", tokens: 200, cost: 2)
+            ],
+            journalEntries: [expired, boundary]
+        )
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        let journal = UsageDomainService.makeDomainModel(
+            usage: usage,
+            calendar: calendar,
+            now: date("2026-07-13T12:00:00Z")
+        ).journal
+
+        XCTAssertEqual(journal.last7DayGroups.map(\.date), ["2026-07-07"])
+        XCTAssertEqual(journal.last7DayGroups[0].entries.count, 1)
+    }
+
     private func journal(
         entries: [UsageSnapshot.JournalEntry],
         tokens: Int,

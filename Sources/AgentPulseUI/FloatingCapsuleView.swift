@@ -44,7 +44,7 @@ public struct FloatingCapsuleStackView: View {
     }
 }
 
-private enum CapsuleQuotaWindow {
+private enum CapsuleQuotaWindow: String {
     case fiveHour
     case week
 
@@ -65,10 +65,6 @@ private enum CapsuleQuotaWindow {
     var other: CapsuleQuotaWindow {
         self == .fiveHour ? .week : .fiveHour
     }
-
-    mutating func toggle() {
-        self = other
-    }
 }
 
 public struct FloatingCapsuleView: View {
@@ -78,7 +74,7 @@ public struct FloatingCapsuleView: View {
     let agents: [AgentSnapshot]
     let settings: AgentPulseSettings
     let expanded: Bool
-    @State private var quotaWindow: CapsuleQuotaWindow = .fiveHour
+    @AppStorage("capsule.quotaWindow") private var quotaWindowSelection = CapsuleQuotaWindow.fiveHour.rawValue
 
     public init(agent: AgentSnapshot, agents: [AgentSnapshot] = [], settings: AgentPulseSettings, expanded: Bool) {
         self.agent = agent
@@ -312,7 +308,7 @@ public struct FloatingCapsuleView: View {
         let accent = percent.map(quotaAccent) ?? settings.secondaryText(system: colorScheme)
         return Button {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                quotaWindow.toggle()
+                quotaWindowSelection = quotaWindow.other.rawValue
             }
         } label: {
             HStack(spacing: 4) {
@@ -346,6 +342,10 @@ public struct FloatingCapsuleView: View {
         }
         text += " · 点击切换到\(quotaWindow.other.fullTitle)"
         return text
+    }
+
+    private var quotaWindow: CapsuleQuotaWindow {
+        CapsuleQuotaWindow(rawValue: quotaWindowSelection) ?? .fiveHour
     }
 
     private var selectedQuotaPercent: Int? {

@@ -902,6 +902,7 @@ private struct UsagePage: View {
                         .disabled(store.isRefreshingUsage)
                 }
                 SourceRow(title: "Token", value: codex?.usage.tokenDataSource ?? "~/.codex/sessions JSONL", detail: scannedFileDetail)
+                SourceRow(title: "日志", value: latestSessionSourceTitle, detail: latestSessionSourceDetail)
                 SourceRow(title: "额度", value: codex?.usage.quotaDataSource ?? "等待首次刷新", detail: quotaUpdateDetail)
             }
             GlassPanel(title: "最近 7 天趋势") {
@@ -984,22 +985,32 @@ private struct UsagePage: View {
             return "正在后台刷新；当前显示上次成功扫描的数据。"
         }
         let scanText = codex?.usage.usageScannedAt.map { " · 更新于 \($0.formatted(date: .omitted, time: .standard))" } ?? ""
-        let latestText = latestSessionDetail
-        return count > 0 ? "已索引 \(count) 个会话文件\(scanText)\(latestText)。" : "还没有索引到可用 usage 数据。"
+        return count > 0 ? "已索引 \(count) 个会话文件\(scanText)。" : "还没有索引到可用 usage 数据。"
     }
 
-    private var latestSessionDetail: String {
-        guard let path = codex?.usage.latestSessionPath else { return "" }
-        let file = URL(fileURLWithPath: path).lastPathComponent
+    private var latestSessionSourceTitle: String {
+        guard let path = codex?.usage.latestSessionPath else { return "等待会话写入" }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private var latestSessionSourceDetail: String {
         if let date = codex?.usage.latestSessionModifiedAt {
-            return " · 最新 \(file) \(date.formatted(date: .omitted, time: .shortened))"
+            return "最近写入于 \(date.formatted(date: .abbreviated, time: .standard))。"
         }
-        return " · 最新 \(file)"
+        return "尚未读取到最新日志写入时间。"
     }
 
     private var quotaUpdateDetail: String {
         if store.isRefreshingCodexQuota {
             return "正在刷新 Codex WHAM；当前显示上次成功获取的额度数据。"
+        }
+        if let error = usageCenter.quota.lastError, !error.isEmpty,
+           let errorAt = usageCenter.quota.lastErrorAt,
+           usageCenter.quota.updatedAt.map({ errorAt >= $0 }) ?? true {
+            let cachedAt = usageCenter.quota.updatedAt.map {
+                "；当前保留 \($0.formatted(date: .omitted, time: .standard)) 的成功数据"
+            } ?? ""
+            return "刷新失败：\(error)\(cachedAt)。"
         }
         guard let date = usageCenter.quota.updatedAt else {
             return "首次刷新后会优先尝试 Codex WHAM 额度接口。"
@@ -1358,7 +1369,7 @@ private struct AboutPage: View {
     }
 
     private var currentVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.6"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.7"
     }
 
     private func checkForUpdates() {
@@ -1368,20 +1379,24 @@ private struct AboutPage: View {
             do {
                 let result = try await AgentPulseUpdateChecker.check(currentVersion: currentVersion)
                 await MainActor.run {
-                    checkingUpdate = false
                     updateStatus = result.message
                 }
                 if result.hasUpdate {
-                    let downloadedAssetName = try await AgentPulseUpdateChecker.downloadAndOpenInstaller(from: result.release)
+                    let download = try await AgentPulseUpdateChecker.downloadAndOpenInstaller(from: result.release)
                     await MainActor.run {
+                        checkingUpdate = false
                         updateStatus = """
-                        已下载并打开安装包。
+                        \(download.reusedExistingFile ? "已打开之前下载的安装包。" : "已下载、校验并打开安装包。")
                         当前版本：\(currentVersion)
                         最新版本：\(result.release.displayVersion)
-                        DMG：\(downloadedAssetName)
+                        DMG：\(download.assetName)
                         Release 页面：\(result.release.htmlURL.absoluteString)
                         请关闭 AgentPulse 后，将 DMG 中的新版本拖拽替换到 Applications。
                         """
+                    }
+                } else {
+                    await MainActor.run {
+                        checkingUpdate = false
                     }
                 }
             } catch AgentPulseUpdateChecker.UpdateError.noDMGAsset(let url) {
@@ -1412,6 +1427,8 @@ private enum AgentPulseUpdateChecker {
         case noDMGAsset(URL)
         case badServerResponse(Int)
         case invalidReleaseData
+        case invalidInstaller
+        case cannotOpenInstaller
 
         var errorDescription: String? {
             switch self {
@@ -1427,6 +1444,10 @@ private enum AgentPulseUpdateChecker {
                 "GitHub 返回异常状态码 \(status)。"
             case .invalidReleaseData:
                 "GitHub Release 数据格式无法识别。"
+            case .invalidInstaller:
+                "下载的安装包不完整或不是有效的 DMG，请打开下载页面后重试。"
+            case .cannotOpenInstaller:
+                "安装包已下载，但 macOS 无法打开该 DMG。"
             }
         }
     }
@@ -1441,10 +1462,16 @@ private enum AgentPulseUpdateChecker {
         struct Asset: Decodable {
             let name: String
             let browserDownloadURL: URL
+            let size: Int64
 
             enum CodingKeys: String, CodingKey {
                 case name
                 case browserDownloadURL = "browser_download_url"
+                case size
+            }
+
+            var displaySize: String {
+                ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
             }
         }
 
@@ -1465,6 +1492,11 @@ private enum AgentPulseUpdateChecker {
         var dmgAsset: Asset? {
             assets.first { $0.name.lowercased().hasSuffix(".dmg") }
         }
+    }
+
+    struct DownloadResult {
+        let assetName: String
+        let reusedExistingFile: Bool
     }
 
     static func check(currentVersion: String) async throws -> Result {
@@ -1499,7 +1531,7 @@ private enum AgentPulseUpdateChecker {
             throw UpdateError.invalidReleaseData
         }
         let hasUpdate = compare(release.displayVersion, currentVersion) == .orderedDescending
-        let assetName = release.dmgAsset?.name ?? "未找到 DMG"
+        let assetName = release.dmgAsset.map { "\($0.name)（\($0.displaySize)）" } ?? "未找到 DMG"
         let message = hasUpdate
             ? """
             发现新版本，正在准备下载…
@@ -1517,9 +1549,19 @@ private enum AgentPulseUpdateChecker {
         return Result(hasUpdate: hasUpdate, message: message, release: release)
     }
 
-    static func downloadAndOpenInstaller(from release: GitHubRelease) async throws -> String {
+    static func downloadAndOpenInstaller(from release: GitHubRelease) async throws -> DownloadResult {
         guard let asset = release.dmgAsset else {
             throw UpdateError.noDMGAsset(release.htmlURL)
+        }
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+        let destination = downloads.appendingPathComponent(asset.name)
+        let downloadedVersionKey = "update.lastDownloadedVersion"
+        if UserDefaults.standard.string(forKey: downloadedVersionKey) == release.displayVersion,
+           isValidDMG(at: destination, expectedSize: asset.size) {
+            let opened = await MainActor.run { NSWorkspace.shared.open(destination) }
+            guard opened else { throw UpdateError.cannotOpenInstaller }
+            return DownloadResult(assetName: "\(asset.name)（\(asset.displaySize)）", reusedExistingFile: true)
         }
         let temporaryURL: URL
         let response: URLResponse
@@ -1541,17 +1583,17 @@ private enum AgentPulseUpdateChecker {
         default:
             throw UpdateError.badServerResponse(http.statusCode)
         }
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
-        let destination = downloads.appendingPathComponent(asset.name)
+        guard isValidDMG(at: temporaryURL, expectedSize: asset.size) else {
+            throw UpdateError.invalidInstaller
+        }
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.moveItem(at: temporaryURL, to: destination)
-        await MainActor.run {
-            _ = NSWorkspace.shared.open(destination)
-        }
-        return asset.name
+        UserDefaults.standard.set(release.displayVersion, forKey: downloadedVersionKey)
+        let opened = await MainActor.run { NSWorkspace.shared.open(destination) }
+        guard opened else { throw UpdateError.cannotOpenInstaller }
+        return DownloadResult(assetName: "\(asset.name)（\(asset.displaySize)）", reusedExistingFile: false)
     }
 
     static func openReleasesPage() {
@@ -1568,6 +1610,23 @@ private enum AgentPulseUpdateChecker {
             UpdateError.networkUnavailable
         default:
             error
+        }
+    }
+
+    private static func isValidDMG(at url: URL, expectedSize: Int64) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize,
+              fileSize >= 512,
+              expectedSize <= 0 || Int64(fileSize) == expectedSize,
+              let handle = try? FileHandle(forReadingFrom: url) else {
+            return false
+        }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: UInt64(fileSize - 512))
+            return try handle.read(upToCount: 4) == Data("koly".utf8)
+        } catch {
+            return false
         }
     }
 

@@ -225,12 +225,17 @@ public enum UsageDomainService {
 
     private static func journalEntriesForDisplay(_ entries: [UsageSnapshot.JournalEntry]) -> [UsageSnapshot.JournalEntry] {
         var displayEntries: [UsageSnapshot.JournalEntry] = []
+        var acceptedEntries: [UsageSnapshot.JournalEntry] = []
         for entry in entries.sorted(by: {
             if $0.startedAt == $1.startedAt {
                 return $0.endedAt > $1.endedAt
             }
             return $0.startedAt < $1.startedAt
         }) {
+            guard !acceptedEntries.contains(where: { isDuplicateJournalEntry(entry, $0) }) else {
+                continue
+            }
+            acceptedEntries.append(entry)
             guard isAutoReviewEntry(entry),
                   let parentIndex = displayEntries.indices.reversed().first(where: { index in
                       let parent = displayEntries[index]
@@ -248,6 +253,14 @@ public enum UsageDomainService {
             displayEntries[parentIndex].cost = combinedJournalCost(displayEntries[parentIndex].cost, entry.cost)
         }
         return displayEntries
+    }
+
+    private static func isDuplicateJournalEntry(_ first: UsageSnapshot.JournalEntry, _ second: UsageSnapshot.JournalEntry) -> Bool {
+        abs(first.startedAt.timeIntervalSince(second.startedAt)) < 1
+            && abs(first.endedAt.timeIntervalSince(second.endedAt)) < 1
+            && first.tokens == second.tokens
+            && first.cost == second.cost
+            && first.model == second.model
     }
 
     private static func isAutoReviewEntry(_ entry: UsageSnapshot.JournalEntry) -> Bool {
@@ -275,11 +288,18 @@ public enum UsageDomainService {
         calendar: Calendar,
         now: Date
     ) -> [UsageDomainModel.JournalSummary.DayGroup] {
-        let grouped = Dictionary(grouping: entries) { dayKey($0.startedAt, calendar: calendar) }
         let cutoff = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: now)) ?? .distantPast
+        let end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? .distantFuture
+        let grouped = Dictionary(grouping: entries.filter { $0.startedAt >= cutoff && $0.startedAt < end }) {
+            dayKey($0.startedAt, calendar: calendar)
+        }
         let dates = Set(grouped.keys).union(
             dailyUsage.values
-                .filter { $0.tokens > 0 && (date(fromDayKey: $0.date, calendar: calendar) ?? .distantPast) >= cutoff }
+                .filter {
+                    guard $0.tokens > 0,
+                          let date = date(fromDayKey: $0.date, calendar: calendar) else { return false }
+                    return date >= cutoff && date < end
+                }
                 .map(\.date)
         )
         return dates
